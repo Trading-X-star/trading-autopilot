@@ -7,8 +7,8 @@ pandas==1.5.3
 scipy==1.9.3
 
 # ML Libraries
-scikit-learn==1.2.1
-lightgbm==4.0.0
+scikit-learn>=1.5.0
+lightgbm>=4.6.0
 xgboost==2.0.0
 catboost==1.2.1
 
@@ -26,12 +26,12 @@ loguru==0.6.0
 
 # Utilities
 python-dotenv==1.0.0
-tqdm==4.65.0
+tqdm>=4.66.3
 joblib==1.2.0
 
 # API (optional for serving)
 flask==2.3.2
-gunicorn==21.2.0
+gunicorn>=22.0.0
 
 # Database (optional)
 sqlalchemy==2.0.15

@@ -1,6 +1,6 @@
 FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
 
-RUN apt-get update && apt-get install -y gcc g++ && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends gcc g++ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -14,3 +14,8 @@ ENV HF_HOME=/app/models/hf_cache
 
 EXPOSE 8005
 CMD ["python", "main.py"]
+
+# Security fixes
+RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
+USER appuser
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 CMD curl -f http://localhost:8080/health || exit 1
