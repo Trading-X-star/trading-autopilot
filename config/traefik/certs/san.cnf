@@ -1,0 +1,17 @@
+[req]
+distinguished_name = req_distinguished_name
+req_extensions = v3_req
+[req_distinguished_name]
+[v3_req]
+subjectAltName = @alt_names
+[alt_names]
+DNS.1 = localhost
+DNS.2 = traefik
+DNS.3 = *.trading.local
+DNS.4 = orchestrator
+DNS.5 = executor
+DNS.6 = strategy
+DNS.7 = risk-manager
+DNS.8 = dashboard
+DNS.9 = kill-switch
+IP.1 = 127.0.0.1

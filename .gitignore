@@ -148,3 +148,11 @@ grafana_data/
 *.backup
 *.bkp
 backups/
+
+# Security - NEVER COMMIT
+secrets/
+.env.secure
+*.key
+*.crt
+*.csr
+backups/

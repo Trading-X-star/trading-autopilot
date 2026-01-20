@@ -1,12 +1,20 @@
 api:
   dashboard: true
-  insecure: true
+  insecure: false
 
 entryPoints:
   web:
     address: ":80"
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
   websecure:
     address: ":443"
+    http:
+      tls:
+        certResolver: default
   metrics:
     address: ":8082"
 
@@ -15,6 +23,20 @@ providers:
     endpoint: "unix:///var/run/docker.sock"
     exposedByDefault: false
     network: trading-net
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true
+
+tls:
+  certificates:
+    - certFile: /etc/traefik/certs/traefik.crt
+      keyFile: /etc/traefik/certs/traefik.key
+  options:
+    default:
+      minVersion: VersionTLS12
+      cipherSuites:
+        - TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+        - TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
 
 metrics:
   prometheus:
@@ -23,6 +45,11 @@ metrics:
 accessLog:
   filePath: "/var/log/traefik/access.log"
   format: json
+  fields:
+    headers:
+      names:
+        X-Real-Ip: keep
+        Authorization: drop
 
 log:
   level: INFO

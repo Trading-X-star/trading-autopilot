@@ -1,0 +1,110 @@
+http:
+  middlewares:
+    # Rate Limiting - 100 запросов в секунду
+    rate-limit:
+      rateLimit:
+        average: 100
+        burst: 200
+        period: 1s
+    
+    # Строгий лимит для торговых операций - 10/сек
+    rate-limit-trading:
+      rateLimit:
+        average: 10
+        burst: 20
+        period: 1s
+    
+    # Лимит для аутентификации - защита от брутфорса
+    rate-limit-auth:
+      rateLimit:
+        average: 5
+        burst: 10
+        period: 1m
+    
+    # Security Headers
+    security-headers:
+      headers:
+        frameDeny: true
+        sslRedirect: true
+        browserXssFilter: true
+        contentTypeNosniff: true
+        stsIncludeSubdomains: true
+        stsPreload: true
+        stsSeconds: 31536000
+        customResponseHeaders:
+          X-Robots-Tag: "noindex,nofollow"
+          Server: ""
+    
+    # IP Whitelist для admin endpoints
+    ip-whitelist-admin:
+      ipWhiteList:
+        sourceRange:
+          - "127.0.0.1/32"
+          - "10.0.0.0/8"
+          - "172.16.0.0/12"
+          - "192.168.0.0/16"
+    
+    # Circuit Breaker
+    circuit-breaker:
+      circuitBreaker:
+        expression: "ResponseCodeRatio(500, 600, 0, 600) > 0.30 || NetworkErrorRatio() > 0.10"
+    
+    # Retry
+    retry:
+      retry:
+        attempts: 3
+        initialInterval: 100ms
+
+  # Роутеры с middleware
+  routers:
+    dashboard-secure:
+      rule: "PathPrefix(`/dashboard`)"
+      service: dashboard
+      middlewares:
+        - rate-limit
+        - security-headers
+      tls: {}
+    
+    api-secure:
+      rule: "PathPrefix(`/api/v1`)"
+      service: orchestrator
+      middlewares:
+        - rate-limit
+        - security-headers
+        - circuit-breaker
+      tls: {}
+    
+    trading-secure:
+      rule: "PathPrefix(`/api/v1/trade`) || PathPrefix(`/api/v1/order`)"
+      service: executor
+      middlewares:
+        - rate-limit-trading
+        - security-headers
+      tls: {}
+    
+    kill-switch-secure:
+      rule: "PathPrefix(`/api/emergency`)"
+      service: kill-switch
+      middlewares:
+        - ip-whitelist-admin
+        - rate-limit-auth
+        - security-headers
+      tls: {}
+
+  services:
+    dashboard:
+      loadBalancer:
+        servers:
+          - url: "http://dashboard:8080"
+    orchestrator:
+      loadBalancer:
+        servers:
+          - url: "http://orchestrator:8000"
+    executor:
+      loadBalancer:
+        servers:
+          - url: "http://executor:8001"
+    kill-switch:
+      loadBalancer:
+        servers:
+          - url: "http://kill-switch:8020"

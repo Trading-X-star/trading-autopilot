@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  backup:
+    image: alpine:3.19
+    container_name: backup-service
+    volumes:
+      - ./scripts/backup:/scripts:ro
+      - ./backups:/backups
+      - ./config:/config:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./secrets:/run/secrets:ro
+    environment:
+      - BACKUP_DIR=/backups
+      - RETENTION_DAYS=7
+      - S3_BUCKET=${S3_BUCKET:-}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+    entrypoint: /bin/sh
+    command: ["-c", "apk add --no-cache docker-cli aws-cli postgresql-client && crond -f"]
+    networks:
+      - trading-net
+
+  # Cron для автоматических бэкапов
+  backup-cron:
+    image: alpine:3.19
+    container_name: backup-cron
+    volumes:
+      - ./scripts/backup:/scripts:ro
+      - ./backups:/backups
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - BACKUP_DIR=/backups
+      - RETENTION_DAYS=7
+    command: >
+      sh -c "
+        apk add --no-cache docker-cli bash &&
+        echo '0 */6 * * * /scripts/backup.sh >> /var/log/backup.log 2>&1' > /etc/crontabs/root &&
+        echo '0 0 * * 0 /scripts/backup.sh >> /var/log/backup.log 2>&1' >> /etc/crontabs/root &&
+        crond -f -l 2
+      "
+    restart: unless-stopped
+    networks:
+      - trading-net
+
+networks:
+  trading-net:
+    external: true
