@@ -1,0 +1,22 @@
+# Development Configuration
+app:
+  name: trading-autopilot
+  environment: development
+  debug: true
+
+trading:
+  enabled: true
+  max_accounts: 3
+  emergency_stop_enabled: true
+  paper_trading: true  # Всегда paper в dev!
+
+risk:
+  max_drawdown_pct: 10.0
+  max_position_pct: 20.0
+  daily_loss_limit_pct: 5.0
+  profit_distribution_pct: 10.0
+
+moex:
+  base_url: "https://iss.moex.com/iss"
+  api_timeout_sec: 10
+  rate_limit_per_sec: 5

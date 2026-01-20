@@ -1,0 +1,28 @@
+api:
+  dashboard: true
+  insecure: true
+
+entryPoints:
+  web:
+    address: ":80"
+  websecure:
+    address: ":443"
+  metrics:
+    address: ":8082"
+
+providers:
+  docker:
+    endpoint: "unix:///var/run/docker.sock"
+    exposedByDefault: false
+    network: trading-net
+
+metrics:
+  prometheus:
+    entryPoint: metrics
+
+accessLog:
+  filePath: "/var/log/traefik/access.log"
+  format: json
+
+log:
+  level: INFO

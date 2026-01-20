@@ -1,0 +1,56 @@
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: Trading Alerts
+    folder: Trading
+    interval: 1m
+    rules:
+      - uid: drawdown-alert
+        title: High Drawdown Alert
+        condition: C
+        data:
+          - refId: A
+            queryType: ''
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: trading_drawdown_percent > 3
+        for: 5m
+        annotations:
+          summary: "Drawdown превысил 3%"
+        labels:
+          severity: warning
+
+      - uid: daily-loss-alert
+        title: Daily Loss Limit Alert
+        condition: C
+        data:
+          - refId: A
+            queryType: ''
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: trading_daily_pnl_percent < -2
+        for: 1m
+        annotations:
+          summary: "Дневной убыток превысил 2%"
+        labels:
+          severity: critical
+
+      - uid: service-down-alert
+        title: Service Down Alert
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            model:
+              expr: up{job=~"trading-.*"} == 0
+        for: 2m
+        annotations:
+          summary: "Сервис недоступен"
+        labels:
+          severity: critical

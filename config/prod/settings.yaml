@@ -1,0 +1,58 @@
+# Production Configuration
+app:
+  name: trading-autopilot
+  environment: production
+  debug: false
+
+trading:
+  enabled: true
+  max_accounts: 3
+  emergency_stop_enabled: true
+  paper_trading: false
+
+risk:
+  max_drawdown_pct: 5.0
+  max_position_pct: 10.0
+  daily_loss_limit_pct: 2.0
+  profit_distribution_pct: 10.0
+  volatility_threshold: 30.0
+  max_sector_exposure_pct: 30.0
+
+moex:
+  base_url: "https://iss.moex.com/iss"
+  api_timeout_sec: 5
+  rate_limit_per_sec: 10
+  circuit_breaker:
+    failure_threshold: 5
+    recovery_timeout_sec: 60
+    expected_exceptions:
+      - ConnectionError
+      - TimeoutError
+
+redis:
+  host: redis
+  port: 6379
+  sentinel_enabled: true
+  master_name: "mymaster"
+  password_secret: "vault:secret/redis#password"
+
+postgres:
+  host: postgres
+  port: 5432
+  database: trading
+  replication_enabled: true
+  max_connections: 100
+  ssl_mode: require
+
+monitoring:
+  prometheus_enabled: true
+  metrics_port: 9090
+  tracing_enabled: true
+  log_level: INFO
+
+alerts:
+  telegram_enabled: true
+  email_enabled: false
+  slack_enabled: false
+  drawdown_alert_threshold_pct: 3.0
+  daily_loss_alert_threshold_pct: 1.5
