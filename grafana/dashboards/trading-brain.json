@@ -1,0 +1,128 @@
+{
+  "dashboard": {
+    "id": null,
+    "title": "Trading Brain v5.3",
+    "tags": ["trading", "signals", "risk"],
+    "timezone": "browser",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Fear & Greed Index",
+        "type": "gauge",
+        "gridPos": {"x": 0, "y": 0, "w": 6, "h": 8},
+        "targets": [{"expr": "fear_greed_index", "legendFormat": "F&G"}],
+        "fieldConfig": {
+          "defaults": {
+            "min": 0, "max": 100,
+            "thresholds": {
+              "steps": [
+                {"value": 0, "color": "red"},
+                {"value": 25, "color": "orange"},
+                {"value": 45, "color": "yellow"},
+                {"value": 55, "color": "green"},
+                {"value": 75, "color": "orange"},
+                {"value": 90, "color": "red"}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 2,
+        "title": "Portfolio Capital",
+        "type": "stat",
+        "gridPos": {"x": 6, "y": 0, "w": 6, "h": 4},
+        "targets": [{"expr": "portfolio_capital", "legendFormat": "Capital"}],
+        "fieldConfig": {"defaults": {"unit": "currencyRUB"}}
+      },
+      {
+        "id": 3,
+        "title": "Daily PnL",
+        "type": "stat",
+        "gridPos": {"x": 12, "y": 0, "w": 6, "h": 4},
+        "targets": [{"expr": "daily_pnl", "legendFormat": "PnL"}],
+        "fieldConfig": {"defaults": {"unit": "currencyRUB"}}
+      },
+      {
+        "id": 4,
+        "title": "Current Drawdown",
+        "type": "gauge",
+        "gridPos": {"x": 18, "y": 0, "w": 6, "h": 8},
+        "targets": [{"expr": "current_drawdown * 100", "legendFormat": "DD%"}],
+        "fieldConfig": {
+          "defaults": {
+            "min": 0, "max": 20,
+            "thresholds": {
+              "steps": [
+                {"value": 0, "color": "green"},
+                {"value": 5, "color": "yellow"},
+                {"value": 10, "color": "orange"},
+                {"value": 15, "color": "red"}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 5,
+        "title": "Signals Generated",
+        "type": "timeseries",
+        "gridPos": {"x": 0, "y": 8, "w": 12, "h": 8},
+        "targets": [
+          {"expr": "rate(signals_generated_total[5m])", "legendFormat": "{{signal}}"}
+        ]
+      },
+      {
+        "id": 6,
+        "title": "Patterns Detected",
+        "type": "timeseries",
+        "gridPos": {"x": 12, "y": 8, "w": 12, "h": 8},
+        "targets": [
+          {"expr": "rate(pattern_detected_total[5m])", "legendFormat": "{{pattern}}"}
+        ]
+      },
+      {
+        "id": 7,
+        "title": "Circuit Breaker State",
+        "type": "stat",
+        "gridPos": {"x": 6, "y": 4, "w": 6, "h": 4},
+        "targets": [{"expr": "circuit_breaker_state{service=\"datafeed\"}", "legendFormat": "State"}],
+        "fieldConfig": {
+          "defaults": {
+            "mappings": [
+              {"type": "value", "options": {"0": {"text": "CLOSED", "color": "green"}}},
+              {"type": "value", "options": {"1": {"text": "HALF_OPEN", "color": "yellow"}}},
+              {"type": "value", "options": {"2": {"text": "OPEN", "color": "red"}}}
+            ]
+          }
+        }
+      },
+      {
+        "id": 8,
+        "title": "Rate Limit Usage",
+        "type": "gauge",
+        "gridPos": {"x": 12, "y": 4, "w": 6, "h": 4},
+        "targets": [{"expr": "rate_limit_usage", "legendFormat": "Usage %"}],
+        "fieldConfig": {"defaults": {"min": 0, "max": 100, "unit": "percent"}}
+      },
+      {
+        "id": 9,
+        "title": "Open Positions",
+        "type": "stat",
+        "gridPos": {"x": 0, "y": 16, "w": 4, "h": 4},
+        "targets": [{"expr": "positions_count", "legendFormat": "Positions"}]
+      },
+      {
+        "id": 10,
+        "title": "Scheduler Jobs",
+        "type": "timeseries",
+        "gridPos": {"x": 4, "y": 16, "w": 20, "h": 8},
+        "targets": [
+          {"expr": "rate(scheduler_runs_total[5m])", "legendFormat": "{{job}} - {{status}}"}
+        ]
+      }
+    ],
+    "refresh": "5s",
+    "schemaVersion": 30
+  }
+}

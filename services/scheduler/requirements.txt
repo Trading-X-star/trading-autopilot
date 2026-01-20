@@ -3,8 +3,6 @@ uvicorn
 asyncpg
 redis
 httpx
+prometheus-client
 apscheduler
-prometheus_client
-python-dateutil
-numpy
-pandas
+pyyaml

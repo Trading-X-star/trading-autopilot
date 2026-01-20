@@ -1,4 +1,3 @@
-version: "3.9"
 
 x-common: &common
   restart: unless-stopped
@@ -60,6 +59,8 @@ services:
     build: ./services/scheduler
     <<: *common
     container_name: scheduler
+    volumes:
+      - ./services/scheduler/config.yaml:/app/config.yaml:ro
     environment:
       <<: *env
     ports: ["8009:8009"]

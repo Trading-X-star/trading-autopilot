@@ -1,0 +1,23 @@
+scheduler:
+  enabled: true
+  collect_features_cron: '0 */1 * * *'
+  calculate_sentiment_cron: '0 * * * *'
+  pattern_detection_cron: '*/5 * * * *'
+
+circuit_breaker:
+  failure_threshold: 5
+  timeout_seconds: 60
+
+rate_limiter:
+  max_requests: 100
+  window_seconds: 60
+
+risk:
+  initial_capital: 1000000
+  max_position_pct: 0.10
+  max_daily_loss_pct: 0.02
+  max_drawdown_pct: 0.15
+
+trading:
+  min_confidence: 0.45
+  max_daily_trades: 20
