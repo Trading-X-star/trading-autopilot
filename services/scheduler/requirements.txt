@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+asyncpg
+redis
+httpx
+apscheduler
+prometheus_client
+python-dateutil
+numpy
+pandas

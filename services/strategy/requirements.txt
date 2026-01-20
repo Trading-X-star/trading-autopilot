@@ -1,0 +1,44 @@
+# Requirements for Trainer v6 Ultimate
+# Python 3.9+
+
+# Data processing
+numpy==1.23.5
+pandas==1.5.3
+scipy==1.9.3
+
+# ML Libraries
+scikit-learn==1.2.1
+lightgbm==4.0.0
+xgboost==2.0.0
+catboost==1.2.1
+
+# Imbalanced learning
+imbalanced-learn==0.10.1
+
+# Statistics
+statsmodels==0.13.5
+
+# Hyperparameter optimization
+optuna==3.1.0
+
+# Logging and monitoring
+loguru==0.6.0
+
+# Utilities
+python-dotenv==1.0.0
+tqdm==4.65.0
+joblib==1.2.0
+
+# API (optional for serving)
+flask==2.3.2
+gunicorn==21.2.0
+
+# Database (optional)
+sqlalchemy==2.0.15
+psycopg2-binary==2.9.6
+redis>=4.5.0
+
+# FastAPI
+fastapi==0.104.1
+uvicorn==0.24.0
+prometheus_client==0.19.0

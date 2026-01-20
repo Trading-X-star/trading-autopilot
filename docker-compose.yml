@@ -1,0 +1,205 @@
+version: "3.9"
+
+x-common: &common
+  restart: unless-stopped
+  networks: [trading-net]
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+x-env: &env
+  DATABASE_URL: postgresql://trading:trading123@postgres:5432/trading
+  REDIS_URL: redis://redis:6379/0
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    <<: *common
+    container_name: postgres
+    environment:
+      POSTGRES_DB: trading
+      POSTGRES_USER: trading
+      POSTGRES_PASSWORD: trading123
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./configs/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trading -d trading"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    <<: *common
+    container_name: redis
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes: [redis_data:/data]
+    ports: ["6380:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  orchestrator:
+    build: ./services/orchestrator
+    <<: *common
+    container_name: orchestrator
+    environment:
+      <<: *env
+    ports: ["8000:8000"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+
+  scheduler:
+    build: ./services/scheduler
+    <<: *common
+    container_name: scheduler
+    environment:
+      <<: *env
+    ports: ["8009:8009"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+
+  datafeed:
+    build: ./services/datafeed
+    <<: *common
+    container_name: datafeed
+    environment:
+      <<: *env
+    ports: ["8006:8006"]
+    depends_on:
+      redis: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+
+  strategy:
+    build: ./services/strategy
+    <<: *common
+    container_name: strategy
+    environment:
+      <<: *env
+    volumes:
+      - models_data:/app/models
+      - ./data:/app/data
+    ports: ["8005:8005"]
+    depends_on:
+      redis: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+
+  executor:
+    build: ./services/executor
+    <<: *common
+    container_name: executor
+    environment:
+      <<: *env
+      TINKOFF_TOKEN_FILE: /run/secrets/tinkoff_token
+      TINKOFF_SANDBOX: "true"
+      AUTO_EXECUTE: "false"
+    secrets:
+      - tinkoff_token
+    ports: ["8007:8007"]
+    depends_on:
+      redis: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+
+  prometheus:
+    image: prom/prometheus:latest
+    <<: *common
+    container_name: prometheus
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=7d'
+    ports: ["9090:9090"]
+
+  grafana:
+    image: grafana/grafana:latest
+    <<: *common
+    container_name: grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin123
+    volumes: [grafana_data:/var/lib/grafana]
+    ports: ["3000:3000"]
+
+  risk-manager:
+    build: ./services/risk-manager
+    <<: *common
+    container_name: risk-manager
+    environment:
+      <<: *env
+      EXECUTOR_URL: http://executor:8007
+    ports: ["8001:8001"]
+    depends_on:
+      redis: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+
+  dashboard:
+    build: ./services/dashboard
+    <<: *common
+    container_name: dashboard
+    environment:
+      <<: *env
+      STRATEGY_URL: http://strategy:8005
+      EXECUTOR_URL: http://executor:8007
+      DATAFEED_URL: http://datafeed:8006
+    ports: ["8080:8080"]
+    depends_on:
+      redis: {condition: service_healthy}
+
+  strategy-gpu:
+    build:
+      context: ./services/strategy
+      dockerfile: Dockerfile.gpu
+    ports:
+      - "8005:8005"
+    networks:
+      trading-net:
+        aliases:
+          - strategy
+          - strategy-gpu
+    environment:
+      <<: *env
+    volumes:
+      - models_data:/app/models
+      - ./data:/app/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  backtest:
+    build: ./services/backtest
+    <<: *common
+    container_name: backtest
+    environment:
+      <<: *env
+    ports: ["8015:8015"]
+    depends_on:
+      postgres: {condition: service_healthy}
+
+networks:
+  trading-net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+  models_data:
+
+secrets:
+  tinkoff_token:
+    file: ./secrets/tinkoff_token.txt

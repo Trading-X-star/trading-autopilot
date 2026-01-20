@@ -1,0 +1,150 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+.project
+.pydevproject
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# Testing
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.hypothesis/
+.nox/
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+.env.production
+.env.development
+
+# Logs
+*.log
+logs/
+log/
+*.log.*
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+*.postgres
+database/
+migrations/backup/
+
+# Redis
+dump.rdb
+appendonly.aof
+
+# Docker
+docker-compose.override.yml
+.dockerignore
+
+# Temporary files
+*.tmp
+*.bak
+*.temp
+tmp/
+temp/
+
+# OS specific
+.DS_Store
+Thumbs.db
+.AppleDouble
+.LSOverride
+._*
+
+# Node modules
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Credentials and secrets
+credentials.json
+secrets.json
+config/secrets/
+*.pem
+*.key
+*.crt
+.ssh/
+
+# Project specific
+data/
+outputs/
+results/
+models/
+checkpoints/
+*.pkl
+*.joblib
+*.h5
+*.pt
+*.pth
+
+# Trade specific
+positions.json
+portfolio.json
+backtesting/results/
+live_trading_logs/
+
+# Cache
+.cache/
+*.cache
+
+# Media
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.mp4
+*.mov
+
+# Monitoring
+prometheus_data/
+grafana_data/
+
+# Backups
+*.backup
+*.bkp
+backups/

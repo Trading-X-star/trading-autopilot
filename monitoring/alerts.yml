@@ -1,0 +1,77 @@
+groups:
+  - name: trading_critical
+    rules:
+      - alert: ServiceDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "🔴 {{ $labels.job }} недоступен"
+
+      - alert: HighDrawdown
+        expr: portfolio_drawdown_pct > 10
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "🔴 Просадка {{ $value | printf \"%.1f\" }}%"
+
+      - alert: ConsecutiveLosses
+        expr: consecutive_losses >= 4
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "🔴 {{ $value }} убытков подряд"
+
+  - name: trading_warning
+    rules:
+      - alert: HighLatency
+        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "🟡 Высокая задержка {{ $labels.job }}"
+
+      - alert: LowMLConfidence
+        expr: avg(ml_prediction_confidence) < 0.4
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "🟡 ML confidence {{ $value | printf \"%.2f\" }}"
+
+      - alert: HighMemoryUsage
+        expr: process_resident_memory_bytes / 1024 / 1024 > 500
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "🟡 {{ $labels.job }} использует {{ $value | printf \"%.0f\" }}MB"
+
+      - alert: NoSignals
+        expr: increase(signals_total[1h]) == 0 and on() trading_state == 1
+        for: 2h
+        labels:
+          severity: warning
+        annotations:
+          summary: "🟡 Нет сигналов >2ч"
+
+  - name: trading_info
+    rules:
+      - alert: HighVolatility
+        expr: avg(volatility_20) > 0.03
+        for: 15m
+        labels:
+          severity: info
+        annotations:
+          summary: "ℹ️ Волатильность {{ $value | printf \"%.2f\" }}"
+
+      - alert: MarketClosed
+        expr: hour() < 7 or hour() >= 19
+        labels:
+          severity: info
+        annotations:
+          summary: "ℹ️ Биржа закрыта"

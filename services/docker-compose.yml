@@ -1,0 +1,14 @@
+
+  risk-manager:
+    build: ./services/risk-manager
+    container_name: risk-manager
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://trading:trading123@postgres:5432/trading
+      EXECUTOR_URL: http://executor:8007
+    ports: ["8001:8001"]
+    networks: [trading-net]
+    depends_on:
+      redis: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+    restart: unless-stopped
