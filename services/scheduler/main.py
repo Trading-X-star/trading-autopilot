@@ -651,7 +651,7 @@ class TradingBrain:
     
     async def start(self):
         self.pg = await asyncpg.create_pool(
-            os.getenv("DATABASE_URL", "postgresql://trading:trading123@postgres:5432/trading"),
+            os.getenv("DATABASE_URL", "postgresql://${DB_USER:-trading}:${DB_PASSWORD:-trading123}@${DB_HOST:-postgres}:5432/trading"),
             min_size=5, max_size=20, command_timeout=60
         )
         self.redis = aioredis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"), decode_responses=True)

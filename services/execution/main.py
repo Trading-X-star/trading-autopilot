@@ -108,7 +108,7 @@ class ExecutionService:
     
     async def start(self):
         self.pool = await asyncpg.create_pool(
-            os.getenv("DB_DSN", os.getenv("DATABASE_URL", "postgresql://trading:trading123@postgres:5432/trading")),
+            os.getenv("DB_DSN", os.getenv("DATABASE_URL", "postgresql://${DB_USER:-trading}:${DB_PASSWORD:-trading123}@${DB_HOST:-postgres}:5432/trading")),
             min_size=2, max_size=10
         )
         self.redis = aioredis.from_url(

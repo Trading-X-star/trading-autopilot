@@ -10,7 +10,7 @@ from datetime import datetime
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("ml-train")
 
-DB_DSN = "postgresql://trading:trading123@postgres:5432/trading"
+DB_DSN = "postgresql://${DB_USER:-trading}:${DB_PASSWORD:-trading123}@${DB_HOST:-postgres}:5432/trading"
 
 FEATURE_COLS = [
     'return_1d', 'return_5d', 'return_10d', 'return_20d',

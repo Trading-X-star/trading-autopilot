@@ -22,7 +22,7 @@ SERVICES = {
     "backtest": "http://backtest:8015",
 }
 
-DB_DSN = "postgresql://trading:trading123@postgres:5432/trading"
+DB_DSN = "postgresql://${DB_USER:-trading}:${DB_PASSWORD:-trading123}@${DB_HOST:-postgres}:5432/trading"
 REDIS_URL = "redis://redis:6379/0"
 
 class Colors:

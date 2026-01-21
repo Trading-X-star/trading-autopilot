@@ -147,7 +147,7 @@ class PositionSizer:
             b = avg_win / avg_loss
             p = win_rate
             q = 1 - p
-            kelly_pct = (b * p - q) / b
+            kelly_pct = max(0, (b * p - q) / b)  # Защита от negative edge
         
         # Fractional Kelly
         position_pct = kelly_pct * self.config.kelly_fraction

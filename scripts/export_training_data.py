@@ -6,7 +6,7 @@ import pandas as pd
 
 async def main():
     pool = await asyncpg.create_pool(
-        "postgresql://trading:trading123@postgres:5432/trading",
+        "postgresql://${DB_USER:-trading}:${DB_PASSWORD:-trading123}@${DB_HOST:-postgres}:5432/trading",
         min_size=2, max_size=5
     )
     

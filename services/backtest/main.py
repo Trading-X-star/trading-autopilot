@@ -120,7 +120,7 @@ class BacktestEngine:
     
     async def start(self):
         try:
-            self.pool = await asyncpg.create_pool(os.getenv("DATABASE_URL", "postgresql://trading:trading123@postgres:5432/trading"), min_size=2, max_size=5)
+            self.pool = await asyncpg.create_pool(os.getenv("DATABASE_URL", "postgresql://${DB_USER:-trading}:${DB_PASSWORD:-trading123}@${DB_HOST:-postgres}:5432/trading"), min_size=2, max_size=5)
         except: pass
         logger.info("✅ Backtest Engine v2.0 started")
     
@@ -287,3 +287,15 @@ async def compare(ticker: str = "SBER", start: str = "2024-01-01", end: str = "2
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8015)
+
+# Validation decorator
+from functools import wraps
+def validate_request(func):
+    @wraps(func)
+    async def wrapper(req, *args, **kwargs):
+        if req.position_size_pct <= 0 or req.position_size_pct > 100:
+            return {"error": "position_size_pct must be 1-100"}
+        if req.initial_capital <= 0:
+            return {"error": "initial_capital must be positive"}
+        return await func(req, *args, **kwargs)
+    return wrapper

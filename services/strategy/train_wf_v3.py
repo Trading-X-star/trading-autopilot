@@ -1036,7 +1036,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--mode', choices=['train', 'serve', 'self-learn'], default='train')
     parser.add_argument('--db-url', default=os.environ.get('DATABASE_URL', 
-        'postgresql://trading:trading123@postgres:5432/trading'))
+        'postgresql://${DB_USER:-trading}:${DB_PASSWORD:-trading123}@${DB_HOST:-postgres}:5432/trading'))
     args = parser.parse_args()
     
     trainer = WalkForwardTrainerV4(args.db_url)

@@ -12,7 +12,7 @@ from sklearn.model_selection import TimeSeriesSplit
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("ml-train-v2")
 
-DB_DSN = "postgresql://trading:trading123@postgres:5432/trading"
+DB_DSN = "postgresql://${DB_USER:-trading}:${DB_PASSWORD:-trading123}@${DB_HOST:-postgres}:5432/trading"
 
 # === EXPANDED FEATURES ===
 BASE_FEATURES = [

@@ -196,7 +196,7 @@ class ExecutorService:
         
         try:
             self.pg = await asyncpg.create_pool(
-                os.getenv("DATABASE_URL", "postgresql://trading:trading123@postgres:5432/trading"),
+                os.getenv("DATABASE_URL", "postgresql://${DB_USER:-trading}:${DB_PASSWORD:-trading123}@${DB_HOST:-postgres}:5432/trading"),
                 min_size=2, max_size=10
             )
             await self._init_db()

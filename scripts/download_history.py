@@ -10,7 +10,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger("history-loader")
 
 MOEX_BASE = "https://iss.moex.com/iss"
-DB_DSN = "postgresql://trading:trading123@postgres:5432/trading"
+DB_DSN = "postgresql://${DB_USER:-trading}:${DB_PASSWORD:-trading123}@${DB_HOST:-postgres}:5432/trading"
 
 START_DATE = "2020-01-01"
 END_DATE = datetime.now().strftime("%Y-%m-%d")

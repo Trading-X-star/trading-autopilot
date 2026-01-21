@@ -142,7 +142,7 @@ class RiskManager:
     
     async def start(self):
         self.pool = await asyncpg.create_pool(
-            os.getenv("DB_DSN", os.getenv("DATABASE_URL", "postgresql://trading:trading123@postgres:5432/trading")),
+            os.getenv("DB_DSN", os.getenv("DATABASE_URL", "postgresql://${DB_USER:-trading}:${DB_PASSWORD:-trading123}@${DB_HOST:-postgres}:5432/trading")),
             min_size=2, max_size=10
         )
         self.redis = aioredis.from_url(
@@ -229,7 +229,10 @@ class RiskManager:
     
     async def _get_price(self, ticker: str) -> float:
         try:
-            data = await self.redis.get(f"price:{ticker}")
+            data = await asyncio.wait_for(
+                self.redis.get(f"price:{ticker}"),
+                timeout=2.0
+            )
             return json.loads(data).get("price", 0) if data else 0
         except:
             return 0

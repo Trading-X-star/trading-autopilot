@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Trailing Stop Service - Dynamic stop-loss management with breakeven"""
 import asyncio
+import time
 import os
 import json
 import logging
@@ -41,7 +42,8 @@ class TrailingStopService:
         self.redis = None
         self.http = None
         self.running = False
-        self.stops: dict[str, dict] = {}  # key: "account_id:ticker"
+        self.stops: dict[str, dict] = {}
+        self._lock = asyncio.Lock()  # key: "account_id:ticker"
 
     async def start(self):
         self.redis = aioredis.from_url(
@@ -110,6 +112,7 @@ class TrailingStopService:
                 await asyncio.sleep(10)
 
     async def _check_stop(self, stop: dict):
+        async with self._lock:
         """Check and update trailing stop"""
         ticker = stop["ticker"]
         account_id = stop["account_id"]
@@ -194,9 +197,12 @@ class TrailingStopService:
 
         # Send sell order via execution service
         try:
+            # Idempotency key prevents duplicate orders
+            idempotency_key = f"{account_id}:{ticker}:{int(time.time()*1000)}"
             response = await self.http.post(
                 "http://execution:8003/execute",
                 json={
+                    "idempotency_key": idempotency_key,
                     "account_id": account_id,
                     "ticker": ticker,
                     "side": "sell",

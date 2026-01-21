@@ -7,7 +7,7 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("feature-eng")
 
-DB_DSN = "postgresql://trading:trading123@postgres:5432/trading"
+DB_DSN = "postgresql://${DB_USER:-trading}:${DB_PASSWORD:-trading123}@${DB_HOST:-postgres}:5432/trading"
 
 
 async def init_features_table(pool):
