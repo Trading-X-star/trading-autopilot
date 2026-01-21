@@ -28,3 +28,16 @@ models/*.joblib
 # Docker
 docker-compose.override.yml
 docker-compose.secure.yml
+
+# Backups (NEVER commit!)
+backups/
+*.sql.gz
+*.tar.gz
+*.rdb
+
+# Certificates (NEVER commit!)
+*.crt
+*.csr
+*.key
+*.pem
+config/traefik/certs/
