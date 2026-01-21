@@ -1,0 +1,64 @@
+use_default_settings: true
+
+general:
+  instance_name: "Trading News Search"
+  privacypolicy_url: false
+  donation_url: false
+  contact_url: false
+  enable_metrics: true
+
+search:
+  safe_search: 0
+  autocomplete: "google"
+  default_lang: "ru-RU"
+
+server:
+  secret_key: "CHANGE_ME_RANDOM_STRING"
+  limiter: false
+  image_proxy: true
+
+ui:
+  static_use_hash: true
+  default_theme: simple
+  theme_args:
+    simple_style: dark
+
+engines:
+  # Финансовые новости
+  - name: google news
+    engine: google_news
+    shortcut: gn
+    disabled: false
+
+  - name: bing news
+    engine: bing_news
+    shortcut: bn
+    disabled: false
+
+  - name: yahoo news
+    engine: yahoo_news
+    shortcut: yn
+    disabled: false
+
+  # Русскоязычные источники
+  - name: yandex
+    engine: yandex
+    shortcut: ya
+    disabled: false
+
+  # Финансовые данные  
+  - name: currency
+    engine: currency_convert
+    shortcut: cc
+    disabled: false
+
+  - name: wikidata
+    engine: wikidata
+    shortcut: wd
+    disabled: false
+
+  # Отключаем ненужное
+  - name: pinterest
+    disabled: true
+  - name: piped
+    disabled: true
