@@ -389,6 +389,40 @@ class ExecutorService:
             return [dict(r) for r in rows]
 
 
+    async def _simulate_order(self, ticker: str, side, quantity: int, price: float, confidence: float) -> dict:
+        """Local simulation when Tinkoff unavailable"""
+        order_id = f"SIM-{ticker}-{int(asyncio.get_event_loop().time()*1000)}"
+        result = {
+            "order_id": order_id,
+            "status": "simulated",
+            "ticker": ticker,
+            "side": side.value,
+            "quantity": quantity,
+            "price": price,
+            "message": "Local simulation"
+        }
+        
+        logger.info(f"📝 SIM: {side.value} {quantity} {ticker} @ {price}")
+        
+        if self.pg:
+            try:
+                async with self.pg.acquire() as conn:
+                    await conn.execute(
+                        "INSERT INTO trades (ticker, side, quantity, price, value, order_id, status, signal_confidence) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+                        ticker, side.value, quantity, price, price * quantity, order_id, "simulated", confidence
+                    )
+            except Exception as e:
+                logger.error(f"DB error: {e}")
+        
+        if self.redis:
+            await self.redis.xadd("stream:trades", {
+                "ticker": ticker, "side": side.value, "quantity": str(quantity),
+                "price": str(price), "status": "simulated"
+            }, maxlen=1000)
+        
+        return result
+
+
 svc = ExecutorService()
 
 
