@@ -1,45 +1,28 @@
 #!/usr/bin/env python3
-"""Trading Terminal v7.1 - Tinkoff Format Fix"""
+"""Trading Terminal v9.0 - Ultimate Interactive"""
 
-import os, json, asyncio, logging, time, csv, io, statistics
+import os, json, asyncio, logging, time, statistics
 from datetime import datetime
 from collections import deque, defaultdict
 from contextlib import asynccontextmanager
-from typing import Any, Dict, Deque, List
-from dataclasses import dataclass, asdict
-from enum import Enum
+from typing import Dict, List
 
 import httpx
 import redis.asyncio as aioredis
-from fastapi import FastAPI, Response, WebSocket, WebSocketDisconnect, Query
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi import FastAPI, Response, WebSocket, Query
+from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s|%(levelname)s|%(message)s")
 log = logging.getLogger("terminal")
 
-METRICS = {
-    "v": Counter("t_views", "", ["p"]),
-    "api": Counter("t_api", "", ["e", "s"]),
-    "lat": Histogram("t_lat", "", ["e"]),
-    "ws": Gauge("t_ws", "")
-}
-
-
 def tinkoff_to_float(money) -> float:
-    """Convert Tinkoff MoneyValue to float"""
-    if money is None:
-        return 0.0
-    if isinstance(money, (int, float)):
-        return float(money)
+    if money is None: return 0.0
+    if isinstance(money, (int, float)): return float(money)
     if isinstance(money, dict):
-        units = int(money.get('units', 0) or 0)
-        nano = int(money.get('nano', 0) or 0)
-        return units + nano / 1_000_000_000
+        return int(money.get('units', 0) or 0) + int(money.get('nano', 0) or 0) / 1e9
     return 0.0
-
 
 class C:
     STRATEGY = os.getenv("STRATEGY_URL", "http://strategy:8005")
@@ -48,82 +31,29 @@ class C:
     RISK = os.getenv("RISK_MANAGER_URL", "http://risk-manager:8001")
     ORCH = os.getenv("ORCHESTRATOR_URL", "http://orchestrator:8000")
     BRAIN = os.getenv("BRAIN_URL", "http://scheduler:8009")
+    AUTOMATION = os.getenv("AUTOMATION_URL", "http://automation-v2:8030")
     REDIS = os.getenv("REDIS_URL", "redis://redis:6379/0")
-    TTL = int(os.getenv("CACHE_TTL", "2"))
-    WS_INT = float(os.getenv("WS_INTERVAL", "1.5"))
-    TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "8"))
-    SVC = {"orch": ORCH, "strat": STRATEGY, "exec": EXECUTOR, "feed": DATAFEED, "risk": RISK, "brain": BRAIN}
-
-
-class CS(str, Enum):
-    OK = "ok"
-    FAIL = "fail"
-    HALF = "half"
-
-
-@dataclass
-class Alert:
-    id: str
-    sev: str
-    title: str
-    msg: str
-    ts: str
-    src: str
-    def d(self): return asdict(self)
-
 
 class Cache:
     def __init__(self, ttl=2):
-        self._d, self._ttl, self._h, self._m = {}, ttl, 0, 0
-
+        self._d, self._ttl = {}, ttl
     async def get(self, k):
         e = self._d.get(k)
-        if not e: self._m += 1; return None, 0
+        if not e: return None, 0
         v, x = e
-        if time.time() < x: self._h += 1; return v, 1
-        del self._d[k]; self._m += 1; return None, 0
-
+        if time.time() < x: return v, 1
+        del self._d[k]; return None, 0
     async def set(self, k, v, t=None):
         if len(self._d) > 500: del self._d[min(self._d, key=lambda x: self._d[x][1])]
         self._d[k] = (v, time.time() + (t or self._ttl))
 
-    def inv(self, p):
-        for k in [k for k in self._d if k.startswith(p)]: del self._d[k]
-
-    def st(self):
-        t = self._h + self._m
-        return {"h": self._h, "m": self._m, "r": round(self._h / t, 2) if t else 0}
-
-
-class CB:
-    def __init__(self, th=5, rec=30):
-        self.th, self.rec, self._f, self._u = th, rec, {}, {}
-
-    def st(self, n):
-        u = self._u.get(n)
-        if not u: return CS.OK
-        return CS.FAIL if time.time() < u else CS.HALF
-
-    def fail(self, n):
-        self._f[n] = self._f.get(n, 0) + 1
-        if self._f[n] >= self.th: self._u[n] = time.time() + self.rec
-
-    def ok(self, n): self._f[n] = 0; self._u.pop(n, None)
-    def all(self): return {n: self.st(n).value for n in C.SVC}
-
-
 class WS:
     def __init__(self): self._c, self._l = {}, asyncio.Lock()
-
     async def conn(self, ws):
         await ws.accept()
         async with self._l: self._c[ws] = time.time()
-        METRICS["ws"].set(len(self._c))
-
     async def disc(self, ws):
         async with self._l: self._c.pop(ws, None)
-        METRICS["ws"].set(len(self._c))
-
     async def send(self, d):
         if not self._c: return 0
         m, dead = json.dumps(d, default=str), []
@@ -134,168 +64,101 @@ class WS:
         if dead:
             async with self._l:
                 for w in dead: self._c.pop(w, None)
-            METRICS["ws"].set(len(self._c))
         return len(cs) - len(dead)
-
     @property
     def n(self): return len(self._c)
-
-
-class Alerts:
-    def __init__(self): self._a, self._l = deque(maxlen=100), asyncio.Lock()
-    async def add(self, a):
-        async with self._l: self._a.appendleft(a)
-    async def get(self, n=20):
-        async with self._l: return [x.d() for x in list(self._a)[:n]]
-
 
 class Terminal:
     def __init__(self):
         self.redis = self.http = None
-        self.ws, self.cache, self.cb, self.alerts = WS(), Cache(C.TTL), CB(), Alerts()
+        self.ws, self.cache = WS(), Cache(2)
         self._run, self._tasks = False, []
-        self._hist = {k: deque(maxlen=200) for k in ["dd", "pnl", "eq", "vol", "wr", "fg"]}
-        self._sparks, self._tkstats, self._hourly = {}, {}, defaultdict(list)
+        self._hist = {k: deque(maxlen=500) for k in ["dd", "pnl", "eq", "fg"]}
+        self._sparks, self._tkstats = {}, {}
         self._start, self._peak_eq = 0.0, 0
+        self._alerts = deque(maxlen=50)
 
     async def start(self):
         self._start = time.time()
         self.redis = aioredis.from_url(C.REDIS, decode_responses=True)
-        self.http = httpx.AsyncClient(timeout=httpx.Timeout(C.TIMEOUT, connect=5))
+        self.http = httpx.AsyncClient(timeout=8)
         self._run = True
         self._tasks = [asyncio.create_task(self._loop()), asyncio.create_task(self._sub())]
-        log.info("✅ Terminal v7.1 started")
+        log.info("✅ Terminal v9.0 started")
 
     async def stop(self):
         self._run = False
         for t in self._tasks: t.cancel()
-        for ws in list(self.ws._c):
-            try: await ws.close(1001)
-            except: pass
         if self.http: await self.http.aclose()
         if self.redis: await self.redis.close()
 
     async def _f(self, url, ep):
-        svc = ep.split("_")[0]
-        if self.cb.st(svc) == CS.FAIL: return {}
         v, hit = await self.cache.get(ep)
         if hit: return v
         try:
             r = await self.http.get(url)
-            if r.status_code >= 400: self.cb.fail(svc); return {}
-            self.cb.ok(svc)
+            if r.status_code >= 400: return {}
             d = r.json()
             await self.cache.set(ep, d)
             return d
-        except: self.cb.fail(svc); return {}
+        except: return {}
 
     def _parse_portfolio(self, port):
-        """Parse Tinkoff portfolio format"""
-        if not port or not isinstance(port, dict):
-            return {"balance": 0, "total_value": 0, "unrealized_pnl": 0}
-        
+        if not port: return {"balance": 0, "total_value": 0, "unrealized_pnl": 0}
         if 'totalAmountPortfolio' in port:
-            total = tinkoff_to_float(port.get('totalAmountPortfolio'))
-            cash = tinkoff_to_float(port.get('totalAmountCurrencies'))
-            shares = tinkoff_to_float(port.get('totalAmountShares'))
-            pnl = tinkoff_to_float(port.get('expectedYield'))
-            return {"balance": cash, "total_value": total, "unrealized_pnl": pnl, "shares_value": shares}
-        
+            return {"balance": tinkoff_to_float(port.get('totalAmountCurrencies')),
+                    "total_value": tinkoff_to_float(port.get('totalAmountPortfolio')),
+                    "unrealized_pnl": tinkoff_to_float(port.get('expectedYield'))}
         return {"balance": port.get('balance', 0), "total_value": port.get('total_value', 0), 
                 "unrealized_pnl": port.get('unrealized_pnl', 0)}
 
     def _parse_positions(self, pos_data):
-        """Parse Tinkoff positions format"""
         if not pos_data: return []
-        
-        # If already list, check format
-        if isinstance(pos_data, list):
-            positions = pos_data
-        elif isinstance(pos_data, dict):
-            positions = pos_data.get('positions', [])
-        else:
-            return []
-        
+        positions = pos_data if isinstance(pos_data, list) else pos_data.get('positions', [])
+        # Convert dict {ticker: {qty, price}} to list [{ticker, qty, price}]
+        if isinstance(positions, dict):
+            positions = [{"ticker": k, "quantity": v.get("quantity", 0), "avg_price": v.get("avg_price", 0)} for k, v in positions.items() if v.get("quantity", 0) != 0]
         result = []
         for p in positions:
             if not isinstance(p, dict): continue
             ticker = p.get('ticker', '')
-            if ticker in ('RUB000UTSTOM', ''): continue  # Skip cash
-            
+            if ticker in ('RUB000UTSTOM', ''): continue
             qty = tinkoff_to_float(p.get('quantity', p.get('balance', 0)))
             if qty == 0: continue
-            
-            avg_price = tinkoff_to_float(p.get('averagePositionPrice', p.get('avg_price', 0)))
-            cur_price = tinkoff_to_float(p.get('currentPrice', p.get('current_price', avg_price)))
-            
-            market_value = qty * cur_price
-            pnl = (cur_price - avg_price) * qty if avg_price > 0 else 0
-            pnl_pct = ((cur_price / avg_price) - 1) * 100 if avg_price > 0 else 0
-            
-            result.append({
-                "ticker": ticker,
-                "quantity": qty,
-                "avg_price": avg_price,
-                "current_price": cur_price,
-                "market_value": market_value,
-                "unrealized_pnl": pnl,
-                "pnl_pct": pnl_pct
-            })
+            avg = tinkoff_to_float(p.get('averagePositionPrice', p.get('avg_price', 0)))
+            cur = tinkoff_to_float(p.get('currentPrice', p.get('current_price', avg)))
+            pnl = (cur - avg) * qty if avg > 0 else 0
+            result.append({"ticker": ticker, "quantity": qty, "avg_price": avg, "current_price": cur,
+                          "market_value": qty * cur, "unrealized_pnl": pnl, "pnl_pct": ((cur/avg)-1)*100 if avg>0 else 0})
         return result
-
-    def _parse_trades(self, trades_data):
-        """Parse trades format"""
-        if not trades_data: return []
-        if isinstance(trades_data, list): return trades_data
-        if isinstance(trades_data, dict): return trades_data.get('trades', [])
-        return []
 
     async def data(self):
         res = await asyncio.gather(
             self._f(f"{C.STRATEGY}/scan", "strat_s"),
             self._f(f"{C.DATAFEED}/prices", "feed_p"),
             self._f(f"{C.EXECUTOR}/portfolio", "exec_pf"),
-            self._f(f"{C.EXECUTOR}/trades?limit=100", "exec_tr"),
+            self._f(f"{C.EXECUTOR}/trades?limit=200", "exec_tr"),
             self._f(f"{C.RISK}/health", "risk_h"),
-            self._f(f"{C.DATAFEED}/macro", "feed_m"),
-            self._f(f"{C.ORCH}/health", "orch_h"),
-            self._f(f"{C.EXECUTOR}/positions", "exec_ps"),
             self._f(f"{C.BRAIN}/sentiment", "brain_fg"),
             self._f(f"{C.BRAIN}/config", "brain_cfg"),
-            self._f(f"{C.STRATEGY}/health", "strat_health"),
+            self._f(f"{C.AUTOMATION}/status", "auto_st"),
+            self._f(f"{C.AUTOMATION}/positions", "auto_pos"),
             return_exceptions=True
         )
-
         def sf(v): return {} if isinstance(v, (Exception, type(None))) else v
-        sig, prices, port_raw, trades_raw, risk, macro, state, pos_raw, sentiment, brain_cfg, strat_health = map(sf, res)
+        sig, prices, port_raw, trades_raw, risk, sentiment, brain_cfg, auto_st, auto_pos = map(sf, res)
 
         sig_l = sig if isinstance(sig, list) else sig.get("signals", [])
         port_d = self._parse_portfolio(port_raw)
         pos_l = self._parse_positions(port_raw)
-        tr_l = self._parse_trades(trades_raw)
-        risk_d = risk if isinstance(risk, dict) else {}
-        macro_d = macro if isinstance(macro, dict) else {}
-        state_d = state if isinstance(state, dict) else {}
-        prices_d = prices if isinstance(prices, dict) else {}
-        sentiment_d = sentiment if isinstance(sentiment, dict) else {}
-        brain_cfg_d = brain_cfg if isinstance(brain_cfg, dict) else {}
-        strat_health_d = sf(res[10]) if len(res) > 10 else {}
+        tr_l = trades_raw if isinstance(trades_raw, list) else trades_raw.get("trades", [])
 
-        # Sparklines & sectors
-        sectors = defaultdict(list)
-        for tk, pd in prices_d.items():
+        for tk, pd in (prices if isinstance(prices, dict) else {}).items():
             if isinstance(pd, dict):
-                p = pd.get("price", 0)
-                ch = pd.get("change", pd.get("change_pct", 0))
                 if tk not in self._sparks: self._sparks[tk] = deque(maxlen=50)
-                self._sparks[tk].append(p)
-                sec = pd.get("sector", "other")
-                sectors[sec].append(ch)
+                self._sparks[tk].append(pd.get("price", 0))
 
-        sector_perf = {k: round(sum(v) / len(v), 2) if v else 0 for k, v in sectors.items()}
-
-        # Core metrics
-        dd = float(risk_d.get("drawdown_pct", risk_d.get("drawdown", 0)))
+        dd = float(risk.get("drawdown_pct", risk.get("drawdown", 0)))
         self._hist["dd"].append(dd)
 
         pnls = [t.get("pnl", 0) or 0 for t in tr_l if isinstance(t, dict)]
@@ -306,118 +169,54 @@ class Terminal:
         self._hist["eq"].append(eq)
         self._peak_eq = max(self._peak_eq, eq) if eq > 0 else self._peak_eq
 
-        vol = sum(abs(t.get("quantity", 0) * t.get("price", 0)) for t in tr_l[-20:] if isinstance(t, dict))
-        self._hist["vol"].append(vol)
-
-        fg_val = sentiment_d.get("value", 50)
+        fg_val = sentiment.get("value", 50)
         self._hist["fg"].append(fg_val)
 
-        # Stats
         w = sum(1 for p in pnls if p > 0)
         l = sum(1 for p in pnls if p < 0)
         wr = w / len(pnls) if pnls else 0
-        self._hist["wr"].append(wr)
-
         aw = sum(p for p in pnls if p > 0) / w if w else 0
         al = abs(sum(p for p in pnls if p < 0) / l) if l else 0
         pf = aw / al if al else 0
-
-        avg = sum(pnls) / len(pnls) if pnls else 0
-        std = statistics.stdev(pnls) if len(pnls) > 1 else 1
-        sharpe = avg / max(.01, std)
-
-        neg = [p for p in pnls if p < 0]
-        neg_std = statistics.stdev(neg) if len(neg) > 1 else 1
-        sortino = avg / max(.01, neg_std)
-        calmar = avg / max(.01, dd) if dd > 0 else 0
-
-        streak = 0
-        for p in reversed(pnls[:20]):
-            if p > 0:
-                if streak >= 0: streak += 1
-                else: break
-            elif p < 0:
-                if streak <= 0: streak -= 1
-                else: break
-
-        hr = datetime.now().hour
-        self._hourly[hr].append(total_pnl)
-        hourly_avg = {h: round(sum(v[-10:]) / len(v[-10:]), 0) if v else 0 for h, v in self._hourly.items()}
+        sharpe = (sum(pnls)/len(pnls)) / max(.01, statistics.stdev(pnls) if len(pnls)>1 else 1) if pnls else 0
 
         for t in tr_l:
             tk = t.get("ticker")
             if tk:
-                if tk not in self._tkstats: self._tkstats[tk] = {"pnl": 0, "n": 0, "w": 0, "vol": 0}
+                if tk not in self._tkstats: self._tkstats[tk] = {"pnl": 0, "n": 0, "w": 0}
                 self._tkstats[tk]["pnl"] += t.get("pnl", 0) or 0
                 self._tkstats[tk]["n"] += 1
-                self._tkstats[tk]["vol"] += abs(t.get("quantity", 0) * t.get("price", 0))
                 if (t.get("pnl", 0) or 0) > 0: self._tkstats[tk]["w"] += 1
 
-        top_tk = sorted(self._tkstats.items(), key=lambda x: x[1]["pnl"], reverse=True)[:8]
-
+        top_tk = sorted(self._tkstats.items(), key=lambda x: x[1]["pnl"], reverse=True)[:10]
         long_exp = sum(p.get("market_value", 0) for p in pos_l if p.get("quantity", 0) > 0)
         short_exp = abs(sum(p.get("market_value", 0) for p in pos_l if p.get("quantity", 0) < 0))
 
         return {
-            "t": "u",
-            "ts": datetime.utcnow().isoformat() + "Z",
-            "signals": sig_l,
-            "prices": prices_d,
-            "port": port_d,
-            "pos": pos_l,
-            "trades": tr_l,
-            "risk": risk_d,
-            "macro": macro_d,
-            "state": state_d,
+            "t": "u", "ts": datetime.utcnow().isoformat() + "Z",
+            "signals": sig_l, "prices": prices, "port": port_d, "pos": pos_l, "trades": tr_l,
             "sparks": {k: list(v) for k, v in list(self._sparks.items())[:30]},
-            "brain": {
-                "fg": fg_val,
-                "fgEmo": sentiment_d.get("emotion", "neutral"),
-                "fgComp": sentiment_d.get("components", {}),
-                "regime": brain_cfg_d.get("regime", "sideways"),
-                "minConf": brain_cfg_d.get("min_confidence", 0.45),
-                "maxPos": brain_cfg_d.get("max_position_pct", 0.1),
-                "maxTrades": brain_cfg_d.get("max_daily_trades", 20),
-                "fgHist": list(self._hist["fg"])[-50:],
-                "model": strat_health_d.get("ml_info", {}),
-            },
-            "m": {
-                "dd": round(dd, 2),
-                "maxDd": round(max(self._hist["dd"]) if self._hist["dd"] else 0, 2),
-                "pnl": round(total_pnl, 0),
-                "eq": round(eq, 0),
-                "peakEq": round(self._peak_eq, 0),
-                "wr": round(wr, 3),
-                "pf": round(pf, 2),
-                "sharpe": round(sharpe, 2),
-                "sortino": round(sortino, 2),
-                "calmar": round(calmar, 2),
-                "n": len(tr_l),
-                "w": w, "l": l,
-                "streak": streak,
-                "avgWin": round(aw, 0),
-                "avgLoss": round(al, 0),
-                "sigN": len([x for x in sig_l if x.get("signal", 0) != 0]),
-                "posN": len(pos_l),
-                "vol": round(vol, 0),
-                "longExp": round(long_exp, 0),
-                "shortExp": round(short_exp, 0),
-                "netExp": round(long_exp - short_exp, 0),
-                "grossExp": round(long_exp + short_exp, 0),
-                "hist": {k: list(v)[-100:] for k, v in self._hist.items()},
-                "topTk": top_tk,
-                "sectors": sector_perf,
-                "hourly": hourly_avg,
-            },
-            "alerts": await self.alerts.get(15),
-            "sys": {"cb": self.cb.all(), "cache": self.cache.st(), "ws": self.ws.n, "up": round(time.time() - self._start)},
+            "brain": {"fg": fg_val, "fgEmo": sentiment.get("emotion", "neutral"), "regime": brain_cfg.get("regime", "sideways"),
+                     "minConf": brain_cfg.get("min_confidence", 0.45), "fgHist": list(self._hist["fg"])[-100:]},
+            "auto": {"enabled": auto_st.get("enabled", False), "regime": auto_st.get("regime", "unknown"),
+                    "positions": auto_st.get("positions", 0), "daily_trades": auto_st.get("daily_trades", 0),
+                    "jobs": auto_st.get("jobs", []), "pos_details": auto_pos if isinstance(auto_pos, dict) else {}},
+            "m": {"dd": round(dd, 2), "maxDd": round(max(self._hist["dd"]) if self._hist["dd"] else 0, 2),
+                 "pnl": round(total_pnl, 0), "eq": round(eq, 0), "peakEq": round(self._peak_eq, 0),
+                 "wr": round(wr, 3), "pf": round(pf, 2), "sharpe": round(sharpe, 2),
+                 "n": len(tr_l), "w": w, "l": l,
+                 "sigN": len([x for x in sig_l if x.get("signal", 0) != 0]), "posN": len(pos_l),
+                 "longExp": round(long_exp, 0), "shortExp": round(short_exp, 0),
+                 "hist": {k: list(v)[-200:] for k, v in self._hist.items()}, "topTk": top_tk},
+            "alerts": list(self._alerts),
+            "sys": {"ws": self.ws.n, "up": round(time.time() - self._start)},
         }
 
     async def _loop(self):
         while self._run:
             try:
                 if self.ws.n > 0: await self.ws.send(await self.data())
-                await asyncio.sleep(C.WS_INT)
+                await asyncio.sleep(1.5)
             except asyncio.CancelledError: break
             except: await asyncio.sleep(5)
 
@@ -432,16 +231,12 @@ class Terminal:
                     try:
                         d = json.loads(msg["data"])
                         ch = msg["channel"]
-                        if ch == "trades": self.cache.inv("exec_")
-                        elif ch == "signals": self.cache.inv("strat_")
-                        elif ch == "alerts":
-                            await self.alerts.add(Alert(str(time.time()), d.get("severity", "info"),
-                                d.get("title", ""), d.get("message", ""), datetime.utcnow().isoformat(), d.get("source", "")))
+                        if ch == "alerts":
+                            self._alerts.appendleft({"t": d.get("title", ""), "s": d.get("severity", "info"), "ts": datetime.now().isoformat()})
                         await self.ws.send({"t": "e", "ch": ch, "d": d})
                     except: pass
             except asyncio.CancelledError: break
             except: await asyncio.sleep(5)
-
 
 term = Terminal()
 
@@ -451,54 +246,58 @@ async def lifespan(app):
     yield
     await term.stop()
 
-app = FastAPI(title="Trading Terminal", version="7.1", lifespan=lifespan)
+app = FastAPI(title="Trading Terminal", version="9.0", lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=500)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 @app.get("/health")
-async def health(): return {"ok": 1, "v": "7.1", "up": round(time.time() - term._start), "ws": term.ws.n}
-
-@app.get("/metrics")
-async def metrics(): return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+async def health(): return {"ok": 1, "v": "9.0"}
 
 @app.get("/api/data")
 async def api_data(): return await term.data()
 
-@app.get("/api/export")
-async def export(fmt: str = "csv"):
-    t = await term._f(f"{C.EXECUTOR}/trades?limit=2000", "exec_exp")
-    tl = t if isinstance(t, list) else t.get("trades", [])
-    if fmt == "json": return {"trades": tl}
-    out = io.StringIO()
-    if tl:
-        w = csv.DictWriter(out, fieldnames=tl[0].keys())
-        w.writeheader(); w.writerows(tl)
-    return StreamingResponse(iter([out.getvalue()]), media_type="text/csv",
-        headers={"Content-Disposition": f"attachment;filename=trades_{datetime.now():%Y%m%d}.csv"})
-
-@app.post("/api/brain/correct")
-async def brain_correct():
+@app.post("/api/auto/toggle")
+async def auto_toggle(enabled: bool = True):
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.post(f"{C.BRAIN}/correct")
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.post(f"{C.AUTOMATION}/toggle?enabled={str(enabled).lower()}")
             return r.json()
-    except: return {"error": "failed"}
+    except Exception as e: return {"error": str(e)}
 
-@app.post("/api/brain/retrain")
-async def brain_retrain():
+@app.post("/api/auto/cycle")
+async def auto_force_cycle():
     try:
-        async with httpx.AsyncClient(timeout=120) as client:
-            r = await client.post(f"{C.BRAIN}/retrain")
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.post(f"{C.AUTOMATION}/force_cycle")
             return r.json()
-    except: return {"error": "failed"}
+    except Exception as e: return {"error": str(e)}
 
-@app.get("/api/brain/analysis/{ticker}")
-async def brain_analysis(ticker: str):
+@app.post("/api/order")
+async def place_order(ticker: str, side: str, qty: int = 1):
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            r = await client.get(f"{C.BRAIN}/analysis/{ticker}")
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.post(f"{C.EXECUTOR}/order", json={"ticker": ticker, "direction": side.upper(), "quantity": qty, "order_type": "MARKET"})
             return r.json()
-    except: return {"error": "failed"}
+    except Exception as e: return {"error": str(e)}
+
+@app.post("/api/close")
+async def close_position(ticker: str):
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.post(f"{C.EXECUTOR}/close", json={"ticker": ticker})
+            return r.json()
+    except Exception as e: return {"error": str(e)}
+
+@app.get("/api/ticker/{ticker}")
+async def ticker_info(ticker: str):
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            prices = await client.get(f"{C.DATAFEED}/prices")
+            p = prices.json().get(ticker, {}) if prices.status_code == 200 else {}
+            stats = term._tkstats.get(ticker, {})
+            spark = list(term._sparks.get(ticker, []))
+            return {"ticker": ticker, "price": p, "stats": stats, "spark": spark}
+    except Exception as e: return {"error": str(e)}
 
 @app.websocket("/ws")
 async def ws_ep(ws: WebSocket):
@@ -509,7 +308,7 @@ async def ws_ep(ws: WebSocket):
             try:
                 msg = await asyncio.wait_for(ws.receive_text(), 25)
                 if msg == "ping": await ws.send_text("pong")
-                elif msg.startswith("{"):
+                elif msg.startswith("{"): 
                     c = json.loads(msg)
                     if c.get("a") == "r": await ws.send_json(await term.data())
             except asyncio.TimeoutError: await ws.send_json({"t": "hb"})
@@ -517,340 +316,806 @@ async def ws_ep(ws: WebSocket):
     finally: await term.ws.disc(ws)
 
 @app.get("/", response_class=HTMLResponse)
-async def index():
-    METRICS["v"].labels(p="i").inc()
-    return HTML
+async def index(): return HTML
 
-HTML = '''<!DOCTYPE html>
+HTML = r'''<!DOCTYPE html>
 <html lang="ru">
 <head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
-<title>Trading Terminal v7.1</title>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>Trading Terminal v9.0</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
 <style>
-:root{--bg:#0a0a12;--bg2:#0e0e18;--bg3:#141420;--bg4:#1a1a28;--brd:#252535;--txt:#d0d0e0;--txt2:#606075;--g:#00e676;--r:#ff5555;--y:#ffd740;--b:#40c4ff;--p:#e040fb;--o:#ff9100}
+:root{--bg:#0a0a12;--bg2:#0e0e18;--bg3:#141420;--bg4:#1a1a28;--brd:#252535;--txt:#d0d0e0;--txt2:#606075;--g:#00e676;--r:#ff5555;--y:#ffd740;--b:#40c4ff;--p:#e040fb;--o:#ff9100;--glow:0 0 20px}
+[data-theme="light"]{--bg:#f5f5f7;--bg2:#ffffff;--bg3:#e8e8ed;--bg4:#d5d5dc;--brd:#c5c5d0;--txt:#1a1a2e;--txt2:#6a6a80}
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:ui-monospace,'SF Mono',Monaco,monospace;background:var(--bg);color:var(--txt);overflow-x:hidden;font-size:12px}
-::-webkit-scrollbar{width:4px}::-webkit-scrollbar-thumb{background:var(--brd);border-radius:2px}
-.terminal{display:grid;grid-template-rows:36px 32px 1fr 24px;height:100vh}
+body{font:12px ui-monospace,'SF Mono',Monaco,monospace;background:var(--bg);color:var(--txt);overflow:hidden;touch-action:pan-y}
+::-webkit-scrollbar{width:5px}::-webkit-scrollbar-thumb{background:var(--brd);border-radius:3px}
+::selection{background:var(--b);color:#fff}
+
+/* Layout */
+.app{display:grid;grid-template-rows:40px 36px 1fr 28px;height:100vh;height:100dvh}
 .hdr{background:var(--bg2);display:flex;align-items:center;padding:0 12px;border-bottom:1px solid var(--brd);gap:12px}
-.logo{font-weight:700;color:var(--g);text-shadow:0 0 10px var(--g)}
-.hdr-r{margin-left:auto;display:flex;align-items:center;gap:12px;font-size:11px;color:var(--txt2)}
-.dot{width:6px;height:6px;border-radius:50%}.dot.on{background:var(--g);box-shadow:0 0 8px var(--g)}.dot.off{background:var(--r)}
-.hdr button{background:none;border:none;color:var(--txt2);cursor:pointer;padding:4px 8px;font-size:12px}
-.hdr button:hover{color:var(--txt)}
-.bar{background:var(--bg2);display:flex;align-items:center;padding:0 12px;gap:8px;border-bottom:1px solid var(--brd)}
-.bar input{background:var(--bg3);border:1px solid var(--brd);color:var(--txt);padding:4px 8px;border-radius:4px;width:120px;font-size:11px}
-.bar select{background:var(--bg3);border:1px solid var(--brd);color:var(--txt);padding:3px 6px;border-radius:4px;font-size:11px}
-.tabs{display:flex;gap:4px;margin-left:12px}
-.tab{padding:6px 12px;border-radius:4px;cursor:pointer;color:var(--txt2);font-size:11px}.tab:hover{background:var(--bg3)}.tab.on{background:var(--b);color:#fff}
-.main{display:grid;grid-template-columns:180px 1fr 200px;overflow:hidden}
-@media(max-width:900px){.main{grid-template-columns:1fr}.side,.aside{display:none!important}}
-.side,.aside{background:var(--bg2);border-right:1px solid var(--brd);overflow-y:auto;padding:8px}
-.aside{border-right:none;border-left:1px solid var(--brd)}
-.sec{margin-bottom:12px}.sec-h{font-size:9px;color:var(--txt2);text-transform:uppercase;letter-spacing:1px;margin-bottom:6px}
-.content{overflow:auto;padding:8px}
-.page{display:none}.page.on{display:block}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;margin-bottom:8px}
-.card{background:var(--bg2);border:1px solid var(--brd);border-radius:8px;padding:10px}.card:hover{border-color:var(--b)}
-.card-h{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
-.card-t{font-size:9px;color:var(--txt2);text-transform:uppercase}
-.badge{background:var(--bg4);padding:2px 6px;border-radius:4px;font-size:9px}.badge.g{color:var(--g)}.badge.r{color:var(--r)}.badge.y{color:var(--y)}.badge.b{color:var(--b)}
-.val{font-size:20px;font-weight:700}.val.g{color:var(--g)}.val.r{color:var(--r)}.val.y{color:var(--y)}.val.b{color:var(--b)}.val.p{color:var(--p)}.val.o{color:var(--o)}
-.lbl{font-size:10px;color:var(--txt2);margin-top:2px}
-.row{display:flex;gap:6px;margin-top:6px}
-.mini{flex:1;background:var(--bg3);padding:6px;border-radius:4px;text-align:center}
-.mini-v{font-weight:600;font-size:12px}.mini-l{font-size:9px;color:var(--txt2)}
-canvas{width:100%;height:50px;display:block;margin-top:6px}
-.sig{display:flex;justify-content:space-between;align-items:center;padding:6px 8px;background:var(--bg3);border-radius:4px;margin-bottom:3px;cursor:pointer;font-size:11px}.sig:hover{background:var(--bg4)}
-.sig-tk{font-weight:600}
-.tag{padding:2px 6px;border-radius:3px;font-size:9px;font-weight:600}.tag.buy{background:rgba(0,230,118,.15);color:var(--g)}.tag.sell{background:rgba(255,85,85,.15);color:var(--r)}
-table{width:100%;border-collapse:collapse;font-size:11px}
-th,td{padding:6px;text-align:left;border-bottom:1px solid var(--brd)}
-th{color:var(--txt2);font-size:9px;text-transform:uppercase}
-.pos{background:var(--bg3);padding:6px;border-radius:4px;margin-bottom:4px;font-size:11px}
-.pos-h{display:flex;justify-content:space-between}.pos-tk{font-weight:600}
-.alert{background:var(--bg3);padding:5px 8px;border-radius:4px;margin-bottom:3px;border-left:2px solid var(--brd);font-size:10px}.alert.e{border-color:var(--r)}.alert.w{border-color:var(--y)}
-.svc{display:inline-flex;align-items:center;gap:4px;background:var(--bg3);padding:3px 8px;border-radius:4px;font-size:10px;margin:2px}.svc::before{content:'';width:5px;height:5px;border-radius:50%}.svc.ok::before{background:var(--g)}.svc.fail::before{background:var(--r)}
-.heatmap{display:grid;grid-template-columns:repeat(auto-fill,minmax(60px,1fr));gap:4px}
-.heat{padding:6px;border-radius:4px;text-align:center;font-size:10px}
-.gauge{position:relative;width:100%;height:80px;overflow:hidden}
-.gauge-bg{position:absolute;width:160px;height:80px;left:50%;transform:translateX(-50%);border-radius:80px 80px 0 0;background:linear-gradient(90deg,#ff4444 0%,#ff8800 25%,#888 50%,#88cc00 75%,#00cc00 100%)}
-.gauge-mask{position:absolute;width:120px;height:60px;left:50%;bottom:0;transform:translateX(-50%);background:var(--bg2);border-radius:60px 60px 0 0}
-.gauge-needle{position:absolute;width:4px;height:50px;left:50%;bottom:10px;transform-origin:bottom center;background:var(--txt);border-radius:2px;transition:transform .5s}
-.gauge-val{position:absolute;bottom:5px;width:100%;text-align:center;font-size:18px;font-weight:700}
-.comp-bar{height:6px;background:var(--bg4);border-radius:3px;margin:4px 0;overflow:hidden}
-.comp-fill{height:100%;border-radius:3px;transition:width .3s}
-.brain-btn{background:var(--bg3);border:1px solid var(--brd);color:var(--txt);padding:6px 12px;border-radius:4px;cursor:pointer;font-size:11px;margin:2px}.brain-btn:hover{background:var(--bg4);border-color:var(--b)}
-.footer{background:var(--bg2);border-top:1px solid var(--brd);display:flex;align-items:center;padding:0 12px;font-size:10px;color:var(--txt2);gap:16px}
-#modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:1000;justify-content:center;align-items:center}#modal.on{display:flex}
-.modal-box{background:var(--bg2);border:1px solid var(--brd);border-radius:10px;padding:16px;max-width:500px;width:95%;max-height:80vh;overflow-y:auto}
-.modal-h{display:flex;justify-content:space-between;margin-bottom:12px}.modal-t{font-weight:600;font-size:14px}.modal-x{cursor:pointer;opacity:.5}.modal-x:hover{opacity:1}
-#toast{position:fixed;bottom:30px;right:12px;z-index:999}.toast{background:var(--bg3);border:1px solid var(--brd);padding:8px 12px;border-radius:6px;margin-top:6px;font-size:11px}
-.g{color:var(--g)}.r{color:var(--r)}.y{color:var(--y)}.b{color:var(--b)}.p{color:var(--p)}.o{color:var(--o)}
+.logo{font-weight:700;font-size:14px;color:var(--g);text-shadow:var(--glow) var(--g);cursor:pointer;transition:all .3s}
+.logo:hover{transform:scale(1.05);filter:brightness(1.2)}
+.hdr-c{display:flex;align-items:center;gap:8px;margin-left:auto}
+.hdr-c>*{cursor:pointer;padding:6px 10px;border-radius:6px;transition:all .2s}
+.hdr-c>*:hover{background:var(--bg3)}
+
+/* Ticker tape */
+.tape{background:var(--bg2);border-bottom:1px solid var(--brd);overflow:hidden;position:relative}
+.tape-inner{display:flex;animation:scroll 30s linear infinite;white-space:nowrap}
+.tape:hover .tape-inner{animation-play-state:paused}
+@keyframes scroll{0%{transform:translateX(0)}100%{transform:translateX(-50%)}}
+.tape-item{padding:8px 20px;display:inline-flex;align-items:center;gap:8px;cursor:pointer;transition:background .2s}
+.tape-item:hover{background:var(--bg3)}
+.tape-tk{font-weight:600}
+.tape-ch{font-size:11px}
+
+/* Main */
+.main{display:grid;grid-template-columns:1fr;overflow:hidden;position:relative}
+.main.split{grid-template-columns:1fr 1fr}
+
+/* Panels */
+.panel{background:var(--bg);overflow:auto;padding:10px;position:relative}
+.panel-resize{position:absolute;right:0;top:0;bottom:0;width:5px;cursor:col-resize;background:transparent;z-index:10}
+.panel-resize:hover{background:var(--b)}
+
+/* Cards */
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-bottom:10px}
+.card{background:var(--bg2);border:1px solid var(--brd);border-radius:12px;padding:14px;transition:all .3s;cursor:default;position:relative;overflow:hidden}
+.card::before{content:'';position:absolute;inset:0;background:linear-gradient(135deg,transparent 40%,rgba(64,196,255,.05));opacity:0;transition:opacity .3s}
+.card:hover{border-color:var(--b);transform:translateY(-3px);box-shadow:0 8px 30px rgba(0,0,0,.3)}
+.card:hover::before{opacity:1}
+.card.dragging{opacity:.5;transform:scale(.95)}
+.card.drag-over{border-color:var(--p);border-style:dashed}
+.card-h{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+.card-t{font-size:9px;color:var(--txt2);text-transform:uppercase;letter-spacing:1px}
+.badge{background:var(--bg4);padding:3px 10px;border-radius:6px;font-size:9px;font-weight:600;transition:all .3s}
+.badge.g{background:rgba(0,230,118,.15);color:var(--g)}.badge.r{background:rgba(255,85,85,.15);color:var(--r)}.badge.y{background:rgba(255,215,64,.15);color:var(--y)}.badge.b{background:rgba(64,196,255,.15);color:var(--b)}
+.val{font-size:26px;font-weight:700;transition:all .5s}
+.val.g{color:var(--g)}.val.r{color:var(--r)}.val.y{color:var(--y)}.val.b{color:var(--b)}.val.p{color:var(--p)}
+.val.pulse{animation:pulse .5s}
+@keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.1)}}
+.val.shake{animation:shake .5s}
+@keyframes shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-5px)}75%{transform:translateX(5px)}}
+.lbl{font-size:10px;color:var(--txt2);margin-top:4px}
+.row{display:flex;gap:8px;margin-top:8px}
+.mini{flex:1;background:var(--bg3);padding:10px;border-radius:8px;text-align:center;cursor:pointer;transition:all .2s}
+.mini:hover{background:var(--bg4);transform:scale(1.03)}
+.mini:active{transform:scale(.97)}
+.mini-v{font-weight:700;font-size:15px}.mini-l{font-size:9px;color:var(--txt2);margin-top:3px}
+
+/* Charts */
+.chart-wrap{position:relative;height:100px;margin-top:10px}
+.chart-wrap.expanded{height:200px}
+.chart-zoom{position:absolute;right:5px;top:5px;display:flex;gap:4px;opacity:0;transition:opacity .2s}
+.card:hover .chart-zoom{opacity:1}
+.chart-zoom button{background:var(--bg4);border:none;color:var(--txt);width:24px;height:24px;border-radius:4px;cursor:pointer;font-size:10px}
+.chart-zoom button:hover{background:var(--b)}
+
+/* Signals */
+.sig{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;background:var(--bg3);border-radius:8px;margin-bottom:4px;cursor:pointer;transition:all .2s;border:1px solid transparent;user-select:none}
+.sig:hover{background:var(--bg4);transform:translateX(5px);border-color:var(--b)}
+.sig:active{transform:translateX(2px) scale(.98)}
+.sig.selected{border-color:var(--p);background:rgba(224,64,251,.1)}
+.sig[draggable]{cursor:grab}.sig[draggable]:active{cursor:grabbing}
+.tag{padding:4px 10px;border-radius:5px;font-size:9px;font-weight:700;transition:all .2s}
+.tag:hover{transform:scale(1.1)}
+.tag.buy{background:rgba(0,230,118,.2);color:var(--g)}.tag.sell{background:rgba(255,85,85,.2);color:var(--r)}
+
+/* Positions */
+.pos{background:var(--bg3);padding:12px;border-radius:8px;margin-bottom:5px;cursor:pointer;transition:all .2s;border:1px solid transparent;position:relative}
+.pos:hover{background:var(--bg4);border-color:var(--b)}
+.pos.profit{border-left:3px solid var(--g)}.pos.loss{border-left:3px solid var(--r)}
+.pos-h{display:flex;justify-content:space-between;align-items:center}.pos-tk{font-weight:700;font-size:13px}
+.pos-close{position:absolute;right:8px;top:8px;width:20px;height:20px;border-radius:50%;background:var(--r);color:#fff;border:none;cursor:pointer;opacity:0;transition:all .2s;font-size:10px}
+.pos:hover .pos-close{opacity:1}
+
+/* Gauge */
+.gauge{position:relative;width:140px;height:70px;margin:0 auto;cursor:pointer}
+.gauge-bg{position:absolute;width:100%;height:100%;border-radius:70px 70px 0 0;background:conic-gradient(from 180deg,var(--r) 0deg,var(--o) 45deg,var(--y) 90deg,var(--g) 135deg,var(--g) 180deg);-webkit-mask:radial-gradient(circle at 50% 100%,transparent 45px,#000 46px);mask:radial-gradient(circle at 50% 100%,transparent 45px,#000 46px)}
+.gauge-needle{position:absolute;width:4px;height:55px;left:calc(50% - 2px);bottom:0;background:linear-gradient(to top,var(--txt),transparent);border-radius:2px;transform-origin:bottom center;transition:transform .8s cubic-bezier(.68,-.55,.27,1.55);filter:drop-shadow(0 0 5px var(--txt))}
+.gauge-val{position:absolute;bottom:-25px;width:100%;text-align:center;font-size:20px;font-weight:700}
+.gauge-labels{position:absolute;width:100%;bottom:-8px;display:flex;justify-content:space-between;font-size:8px;color:var(--txt2);padding:0 5px}
+
+/* Quick trade widget */
+.qt{background:var(--bg2);border:1px solid var(--brd);border-radius:12px;padding:12px;position:fixed;bottom:80px;right:20px;width:200px;z-index:100;display:none;box-shadow:0 10px 40px rgba(0,0,0,.5)}
+.qt.on{display:block;animation:slideUp .3s}
+@keyframes slideUp{from{transform:translateY(20px);opacity:0}to{transform:translateY(0);opacity:1}}
+.qt input{width:100%;background:var(--bg3);border:1px solid var(--brd);color:var(--txt);padding:10px;border-radius:6px;font-size:12px;margin-bottom:8px}
+.qt input:focus{border-color:var(--b);outline:none}
+.qt-btns{display:flex;gap:6px}
+.qt-btns button{flex:1;padding:12px;border:none;border-radius:6px;font-weight:700;cursor:pointer;transition:all .2s}
+.qt-btns button:first-child{background:var(--g);color:#000}
+.qt-btns button:last-child{background:var(--r);color:#fff}
+.qt-btns button:hover{transform:scale(1.05)}
+.qt-btns button:active{transform:scale(.95)}
+
+/* Buttons */
+.btn{background:var(--bg3);border:1px solid var(--brd);color:var(--txt);padding:10px 16px;border-radius:8px;cursor:pointer;font-size:11px;font-weight:600;transition:all .2s;position:relative;overflow:hidden}
+.btn::after{content:'';position:absolute;inset:0;background:linear-gradient(90deg,transparent,rgba(255,255,255,.1),transparent);transform:translateX(-100%);transition:transform .5s}
+.btn:hover{background:var(--bg4);border-color:var(--b);transform:translateY(-2px)}
+.btn:hover::after{transform:translateX(100%)}
+.btn:active{transform:translateY(0) scale(.98)}
+.btn.primary{background:linear-gradient(135deg,var(--b),var(--p));border:none;color:#fff}
+.btn.danger{background:var(--r);border-color:var(--r);color:#fff}
+.btn.success{background:var(--g);border-color:var(--g);color:#000}
+.btn-icon{width:36px;height:36px;padding:0;display:flex;align-items:center;justify-content:center;font-size:16px}
+
+/* Switch */
+.switch{position:relative;width:50px;height:26px;background:var(--bg4);border-radius:13px;cursor:pointer;transition:all .3s}
+.switch.on{background:linear-gradient(135deg,var(--g),var(--b))}
+.switch::after{content:'';position:absolute;width:22px;height:22px;background:#fff;border-radius:50%;top:2px;left:2px;transition:all .3s cubic-bezier(.68,-.55,.27,1.55);box-shadow:0 2px 8px rgba(0,0,0,.3)}
+.switch.on::after{left:26px}
+
+/* Footer */
+.footer{background:var(--bg2);border-top:1px solid var(--brd);display:flex;align-items:center;padding:0 12px;gap:20px;font-size:10px}
+.footer>span{cursor:pointer;padding:4px 8px;border-radius:4px;transition:all .2s}
+.footer>span:hover{background:var(--bg3);color:var(--txt)}
+.footer .dot{width:8px;height:8px;border-radius:50%;margin-right:4px;display:inline-block}
+.footer .dot.on{background:var(--g);box-shadow:0 0 8px var(--g);animation:blink 2s infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.5}}
+.footer .dot.off{background:var(--r)}
+
+/* Modal */
+.modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:1000;justify-content:center;align-items:center;backdrop-filter:blur(8px)}
+.modal.on{display:flex;animation:fadeIn .2s}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+.modal-box{background:var(--bg2);border:1px solid var(--brd);border-radius:16px;padding:24px;max-width:450px;width:95%;max-height:85vh;overflow-y:auto;animation:modalIn .3s}
+@keyframes modalIn{from{transform:scale(.9) translateY(20px);opacity:0}to{transform:scale(1) translateY(0);opacity:1}}
+.modal-h{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;padding-bottom:15px;border-bottom:1px solid var(--brd)}
+.modal-t{font-weight:700;font-size:18px}.modal-x{cursor:pointer;font-size:24px;opacity:.5;transition:all .2s;width:36px;height:36px;display:flex;align-items:center;justify-content:center;border-radius:8px}
+.modal-x:hover{opacity:1;background:var(--bg3);transform:rotate(90deg)}
+
+/* Toast */
+.toast-wrap{position:fixed;top:60px;right:20px;z-index:999;display:flex;flex-direction:column;gap:10px;pointer-events:none}
+.toast{background:var(--bg2);border:1px solid var(--brd);padding:14px 18px;border-radius:10px;font-size:12px;display:flex;align-items:center;gap:12px;animation:toastIn .3s;pointer-events:auto;cursor:pointer;box-shadow:0 8px 30px rgba(0,0,0,.4);max-width:300px}
+@keyframes toastIn{from{transform:translateX(100%);opacity:0}to{transform:translateX(0);opacity:1}}
+.toast.out{animation:toastOut .3s forwards}
+@keyframes toastOut{to{transform:translateX(100%);opacity:0}}
+.toast.success{border-color:var(--g)}.toast.error{border-color:var(--r)}.toast.warning{border-color:var(--y)}
+.toast-icon{font-size:18px;flex-shrink:0}
+
+/* Context menu */
+.ctx{position:fixed;background:var(--bg2);border:1px solid var(--brd);border-radius:10px;padding:8px 0;z-index:1001;min-width:160px;display:none;box-shadow:0 8px 30px rgba(0,0,0,.5)}
+.ctx.on{display:block;animation:ctxIn .15s}
+@keyframes ctxIn{from{transform:scale(.9);opacity:0}to{transform:scale(1);opacity:1}}
+.ctx-item{padding:10px 16px;cursor:pointer;font-size:11px;display:flex;align-items:center;gap:10px;transition:all .1s}
+.ctx-item:hover{background:var(--bg3);color:var(--b)}
+.ctx-sep{height:1px;background:var(--brd);margin:6px 0}
+
+/* Command palette */
+.cmd{position:fixed;top:20%;left:50%;transform:translateX(-50%);background:var(--bg2);border:1px solid var(--brd);border-radius:12px;width:500px;max-width:95%;z-index:1002;display:none;box-shadow:0 20px 60px rgba(0,0,0,.6)}
+.cmd.on{display:block;animation:cmdIn .2s}
+@keyframes cmdIn{from{transform:translateX(-50%) translateY(-20px);opacity:0}to{transform:translateX(-50%) translateY(0);opacity:1}}
+.cmd input{width:100%;background:transparent;border:none;color:var(--txt);padding:16px 20px;font-size:14px;border-bottom:1px solid var(--brd)}
+.cmd input:focus{outline:none}
+.cmd-results{max-height:300px;overflow-y:auto}
+.cmd-item{padding:12px 20px;cursor:pointer;display:flex;align-items:center;gap:12px;transition:background .1s}
+.cmd-item:hover,.cmd-item.active{background:var(--bg3)}
+.cmd-item kbd{background:var(--bg4);padding:2px 6px;border-radius:4px;font-size:10px;margin-left:auto}
+
+/* Market timer */
+.timer{position:fixed;top:50px;right:20px;background:var(--bg2);border:1px solid var(--brd);border-radius:8px;padding:8px 14px;font-size:11px;z-index:50;display:flex;align-items:center;gap:8px}
+.timer.closed{border-color:var(--r)}
+.timer.open{border-color:var(--g)}
+.timer-dot{width:8px;height:8px;border-radius:50%}
+.timer.closed .timer-dot{background:var(--r)}.timer.open .timer-dot{background:var(--g);animation:blink 1s infinite}
+
+/* Ripple effect */
+.ripple{position:absolute;border-radius:50%;background:rgba(255,255,255,.3);transform:scale(0);animation:ripple .6s linear}
+@keyframes ripple{to{transform:scale(4);opacity:0}}
+
+/* Sound toggle */
+.sound-btn{position:relative}.sound-btn.muted::after{content:'';position:absolute;width:2px;height:20px;background:var(--r);transform:rotate(45deg);top:8px;left:17px}
+
+/* Loading */
+.loading{position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;z-index:2000}
+.loading.done{animation:fadeOut .5s forwards}
+@keyframes fadeOut{to{opacity:0;visibility:hidden}}
+.loader{width:50px;height:50px;border:3px solid var(--brd);border-top-color:var(--b);border-radius:50%;animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* Responsive */
+@media(max-width:768px){
+.hdr{padding:0 8px}.logo{font-size:12px}
+.card{padding:10px}.val{font-size:20px}
+.qt{width:calc(100% - 20px);right:10px;left:10px}
+}
 </style>
 </head>
 <body>
-<div class="terminal">
-<div class="hdr">
-<span class="logo">◉ TERMINAL v7.1</span>
-<div class="hdr-r"><span id="tm">--:--:--</span><span id="regime" class="badge">--</span><div class="dot off" id="ws"></div><button onclick="refresh()">↻</button></div>
-</div>
-<div class="bar">
-<input type="text" id="q" placeholder="Search..." oninput="filter()">
-<select id="f" onchange="filter()"><option value="">All</option><option value="buy">BUY</option><option value="sell">SELL</option></select>
-<div class="tabs">
-<div class="tab on" data-p="dash">Dashboard</div>
-<div class="tab" data-p="brain">🧠 Model</div>
-<div class="tab" data-p="signals">Signals</div>
-<div class="tab" data-p="trades">Trades</div>
-</div>
-</div>
-<div class="main">
-<div class="side">
-<div class="sec"><div class="sec-h">🎭 Fear & Greed</div>
-<div class="gauge"><div class="gauge-bg"></div><div class="gauge-mask"></div><div class="gauge-needle" id="fgNeedle"></div><div class="gauge-val" id="fgVal">50</div></div>
-<div style="text-align:center;font-size:10px;color:var(--txt2)" id="fgEmo">Neutral</div>
-</div>
-<div class="sec"><div class="sec-h">Positions</div><div id="positions"></div></div>
-<div class="sec"><div class="sec-h">Top Tickers</div><div id="topTk"></div></div>
-</div>
-<div class="content">
-<div class="page on" id="p-dash">
-<div class="grid">
-<div class="card"><div class="card-h"><span class="card-t">Balance</span></div><div class="val b" id="bal">--</div><div class="lbl">P&L <span id="pnl" class="g">--</span></div></div>
-<div class="card"><div class="card-h"><span class="card-t">Drawdown</span><span class="badge" id="rLvl">--</span></div><div class="val" id="dd">0%</div><div class="lbl">Max <span id="mdd">0%</span></div></div>
-<div class="card"><div class="card-h"><span class="card-t">Win Rate</span></div><div class="val g" id="wr">0%</div><div class="row"><div class="mini"><div class="mini-v g" id="wN">0</div><div class="mini-l">Wins</div></div><div class="mini"><div class="mini-v r" id="lN">0</div><div class="mini-l">Loss</div></div></div></div>
-<div class="card"><div class="card-h"><span class="card-t">Performance</span></div><div class="row"><div class="mini"><div class="mini-v" id="sh">0</div><div class="mini-l">Sharpe</div></div><div class="mini"><div class="mini-v" id="pf">0</div><div class="mini-l">P.Factor</div></div></div></div>
-</div>
-<div class="grid">
-<div class="card"><div class="card-t">Equity</div><canvas id="eqC"></canvas></div>
-<div class="card"><div class="card-t">Drawdown</div><canvas id="ddC"></canvas></div>
-<div class="card"><div class="card-t">Fear & Greed</div><canvas id="fgC"></canvas></div>
-</div>
-<div class="card"><div class="card-h"><span class="card-t">Signals</span><span class="badge" id="sc">0</span></div><div id="sigs" style="max-height:200px;overflow-y:auto"></div></div>
-</div>
-<div class="page" id="p-brain">
-<div class="grid">
-<div class="card" style="grid-column:span 2">
-<div class="card-h"><span class="card-t">🎭 Fear & Greed Index</span><span class="badge b" id="fgBadge">50</span></div>
-<div class="row">
-<div class="mini"><div class="mini-v p" id="fgMain">50</div><div class="mini-l">Current</div></div>
-<div class="mini"><div class="mini-v" id="fgEmoMain">Neutral</div><div class="mini-l">Emotion</div></div>
-<div class="mini"><div class="mini-v b" id="regimeMain">sideways</div><div class="mini-l">Regime</div></div>
-</div>
-<canvas id="fgHist" style="height:60px;margin-top:10px"></canvas>
-</div>
-<div class=\"card\">\n<div class=\"card-t\">🤖 Model Status</div>\n<div style=\"margin-top:8px\">\n<div style=\"display:flex;justify-content:space-between;margin:4px 0\"><span class=\"txt2\">Version</span><span id=\"modelVer\" class=\"b\">--</span></div>\n<div style=\"display:flex;justify-content:space-between;margin:4px 0\"><span class=\"txt2\">Accuracy</span><span id=\"modelAcc\" class=\"g\">--</span></div>\n<div style=\"display:flex;justify-content:space-between;margin:4px 0\"><span class=\"txt2\">Features</span><span id=\"modelFeat\">--</span></div>\n<div style=\"display:flex;justify-content:space-between;margin:4px 0\"><span class=\"txt2\">Ready</span><span id=\"modelReady\">--</span></div>\n</div>\n</div>\n<div class=\"card\">\n<div class=\"card-t\">Model Config</div>
-<div style="margin-top:8px">
-<div style="display:flex;justify-content:space-between;margin:4px 0"><span class="txt2">Min Confidence</span><span id="cfgConf">45%</span></div>
-<div style="display:flex;justify-content:space-between;margin:4px 0"><span class="txt2">Max Position</span><span id="cfgPos">10%</span></div>
-<div style="display:flex;justify-content:space-between;margin:4px 0"><span class="txt2">Max Trades/Day</span><span id="cfgTrades">20</span></div>
-</div>
-</div>
-</div>
-<div class="card"><div class="card-t">F&G Components</div><div id="fgComps" style="margin-top:8px"></div></div>
-<div class="grid" style="margin-top:8px">
-<div class="card">
-<div class="card-t">🔍 Analyze Ticker</div>
-<div style="margin-top:8px">
-<select id="analysisTk" style="width:100%;padding:6px;background:var(--bg3);border:1px solid var(--brd);color:var(--txt);border-radius:4px">
-<option>SBER</option><option>GAZP</option><option>LKOH</option><option>GMKN</option><option>NVTK</option><option>ROSN</option><option>VTBR</option><option>YNDX</option><option>TCSG</option><option>MGNT</option>
-</select>
-<button class="brain-btn" style="width:100%;margin-top:6px" onclick="analyzeTk()">Analyze</button>
-</div>
-</div>
-<div class="card">
-<div class="card-t">⚡ Actions</div>
-<div style="margin-top:8px">
-<button class="brain-btn" style="width:100%" onclick="brainCorrect()">🔧 Auto-Correct</button>
-<button class="brain-btn" style="width:100%;margin-top:4px" onclick="brainRetrain()">🔄 Retrain Model</button>
-</div>
-</div>
-</div>
-<div class="card" style="margin-top:8px"><div class="card-t">📊 Analysis Result</div><div id="analysisResult" style="margin-top:8px;font-size:11px">Select ticker and click Analyze</div></div>
-</div>
-<div class="page" id="p-signals"><div class="card"><div class="card-t">All Signals</div><div id="allSigs" style="max-height:70vh;overflow-y:auto"></div></div></div>
-<div class="page" id="p-trades"><div class="card"><div class="card-h"><span class="card-t">Trades</span><button onclick="exp()" style="font-size:10px;background:var(--bg3);border:1px solid var(--brd);color:var(--txt);padding:3px 8px;border-radius:4px;cursor:pointer">Export</button></div><div style="overflow:auto;max-height:70vh"><table><thead><tr><th>Ticker</th><th>Side</th><th>Qty</th><th>Price</th><th>P&L</th><th>Time</th></tr></thead><tbody id="tbl"></tbody></table></div></div></div>
-</div>
-<div class="aside">
-<div class="sec"><div class="sec-h">Alerts</div><div id="alerts"></div></div>
-<div class="sec"><div class="sec-h">Services</div><div id="svcs"></div></div>
-<div class="sec"><div class="sec-h">System</div><div style="font-size:10px;color:var(--txt2)"><div>WS: <span id="wsN">0</span></div><div>Cache: <span id="cacheR">0%</span></div><div>Uptime: <span id="up">0s</span></div></div></div>
-</div>
-</div>
-<div class="footer"><span>◉ Terminal v7.1</span><span>F&G: <b id="fFg" class="y">50</b></span><span>Signals: <b id="fSig">0</b></span><span>P&L: <b id="fPnl" class="g">0</b></span></div>
-</div>
-<div id="modal"><div class="modal-box"><div class="modal-h"><span class="modal-t" id="mT">--</span><span class="modal-x" onclick="closeM()">×</span></div><div id="mB"></div></div></div>
-<div id="toast"></div>
-<script>
-let ws,D,q='',flt='';
-const $=id=>document.getElementById(id);
-const fmt=(v,s)=>v==null||v===0?'--':(s&&v>0?'+':'')+Math.round(v).toLocaleString('ru')+' ₽';
+<div class="loading" id="loading"><div class="loader"></div></div>
 
-function connect(){
-ws=new WebSocket((location.protocol==='https:'?'wss:':'ws:')+'//'+location.host+'/ws');
-ws.onopen=()=>{$('ws').className='dot on';setInterval(()=>ws?.readyState===1&&ws.send('ping'),20000)};
-ws.onclose=()=>{$('ws').className='dot off';setTimeout(connect,3000)};
-ws.onmessage=e=>{const d=JSON.parse(e.data);if(d.t==='u'){D=d;render(d)}};
+<div class="app">
+<div class="hdr">
+<span class="logo" onclick="location.reload()">◉ TERMINAL v9.0</span>
+<div class="hdr-c">
+<span onclick="toggleTheme()" title="Theme">🌓</span>
+<span class="sound-btn" onclick="toggleSound()" title="Sound">🔊</span>
+<span onclick="toggleFullscreen()" title="Fullscreen">⛶</span>
+<span onclick="showCmd()" title="Commands (Ctrl+K)">⌘</span>
+<span id="time">--:--:--</span>
+<span id="regime" class="badge">--</span>
+<span><span class="dot off" id="ws"></span>WS</span>
+</div>
+</div>
+
+<div class="tape" id="tape"><div class="tape-inner" id="tapeInner"></div></div>
+
+<div class="main" id="main">
+<div class="panel" id="panel1">
+<div class="grid" id="cards">
+<div class="card" draggable="true" data-id="balance">
+<div class="card-h"><span class="card-t">💰 Balance</span><span class="badge b">LIVE</span></div>
+<div class="val b" id="bal">--</div>
+<div class="lbl">P&L <span id="pnl" class="g">--</span></div>
+</div>
+<div class="card" draggable="true" data-id="dd">
+<div class="card-h"><span class="card-t">📉 Drawdown</span><span class="badge" id="rLvl">--</span></div>
+<div class="val" id="dd">0%</div>
+<div class="lbl">Max <span id="mdd">0%</span></div>
+</div>
+<div class="card" draggable="true" data-id="wr">
+<div class="card-h"><span class="card-t">🎯 Win Rate</span></div>
+<div class="val g" id="wr">0%</div>
+<div class="row">
+<div class="mini" onclick="filterTrades('win')"><div class="mini-v g" id="wN">0</div><div class="mini-l">Wins</div></div>
+<div class="mini" onclick="filterTrades('loss')"><div class="mini-v r" id="lN">0</div><div class="mini-l">Loss</div></div>
+</div>
+</div>
+<div class="card" draggable="true" data-id="perf">
+<div class="card-h"><span class="card-t">📊 Performance</span></div>
+<div class="row">
+<div class="mini"><div class="mini-v" id="sh">0</div><div class="mini-l">Sharpe</div></div>
+<div class="mini"><div class="mini-v" id="pf">0</div><div class="mini-l">P.Factor</div></div>
+</div>
+</div>
+</div>
+
+<div class="card">
+<div class="card-h">
+<span class="card-t">📈 Equity</span>
+<div class="chart-zoom">
+<button onclick="zoomChart('eq','out')">−</button>
+<button onclick="zoomChart('eq','in')">+</button>
+<button onclick="expandChart('eq')">⛶</button>
+</div>
+</div>
+<div class="chart-wrap" id="eqWrap"><canvas id="eqChart"></canvas></div>
+</div>
+
+<div class="card" style="margin-top:10px">
+<div class="card-h">
+<span class="card-t">⚡ Signals</span>
+<div style="display:flex;gap:6px">
+<span class="badge b" id="sc">0</span>
+<button class="btn" style="padding:4px 8px" onclick="executeSelected()">Execute</button>
+</div>
+</div>
+<div id="sigs" style="max-height:250px;overflow-y:auto"></div>
+</div>
+
+<div class="card" style="margin-top:10px">
+<div class="card-h">
+<span class="card-t">🤖 Automation</span>
+<div class="switch" id="autoSwitch" onclick="toggleAuto()"></div>
+</div>
+<div class="row">
+<div class="mini"><div class="mini-v b" id="autoRegime">--</div><div class="mini-l">Regime</div></div>
+<div class="mini"><div class="mini-v g" id="autoPos">0</div><div class="mini-l">Positions</div></div>
+<div class="mini"><div class="mini-v y" id="autoTrades">0</div><div class="mini-l">Today</div></div>
+</div>
+<div style="margin-top:10px;display:flex;gap:8px">
+<button class="btn primary" style="flex:1" onclick="forceCycle()">▶ Cycle</button>
+<button class="btn danger" style="flex:1" onclick="emergencyStop()">🛑 Stop</button>
+</div>
+</div>
+
+<div class="card" style="margin-top:10px">
+<div class="card-h"><span class="card-t">📊 Fear & Greed</span></div>
+<div class="gauge" onclick="showFGDetail()">
+<div class="gauge-bg"></div>
+<div class="gauge-needle" id="fgN"></div>
+<div class="gauge-val" id="fgV">50</div>
+<div class="gauge-labels"><span>Fear</span><span>Greed</span></div>
+</div>
+<div style="text-align:center;margin-top:30px;font-size:11px;color:var(--txt2)" id="fgEmo">Neutral</div>
+</div>
+
+<div class="card" style="margin-top:10px">
+<div class="card-h"><span class="card-t">📂 Positions</span><span class="badge" id="posN">0</span></div>
+<div id="positions"></div>
+</div>
+</div>
+</div>
+
+<div class="footer">
+<span><span class="dot" id="wsDot"></span> <span id="wsStatus">Connecting...</span></span>
+<span onclick="showFGDetail()">F&G: <b id="fFg" class="y">50</b></span>
+<span>Signals: <b id="fSig">0</b></span>
+<span>Auto: <b id="fAuto">OFF</b></span>
+<span style="margin-left:auto;opacity:.5">Press <kbd style="background:var(--bg3);padding:2px 6px;border-radius:3px">Ctrl+K</kbd> for commands</span>
+</div>
+</div>
+
+<!-- Quick trade widget -->
+<div class="qt" id="qt">
+<input id="qtTicker" placeholder="Ticker (e.g. SBER)" onkeydown="qtKey(event)" autofocus>
+<input id="qtQty" type="number" value="1" placeholder="Quantity" min="1">
+<div class="qt-btns">
+<button onclick="quickTrade('buy')">BUY</button>
+<button onclick="quickTrade('sell')">SELL</button>
+</div>
+</div>
+
+<!-- Market timer -->
+<div class="timer" id="timer"><span class="timer-dot"></span><span id="timerText">--:--</span></div>
+
+<!-- Modal -->
+<div class="modal" id="modal"><div class="modal-box"><div class="modal-h"><span class="modal-t" id="mT">--</span><span class="modal-x" onclick="closeModal()">×</span></div><div id="mB"></div></div></div>
+
+<!-- Context menu -->
+<div class="ctx" id="ctx">
+<div class="ctx-item" onclick="ctxAction('buy')">🟢 Buy</div>
+<div class="ctx-item" onclick="ctxAction('sell')">🔴 Sell</div>
+<div class="ctx-sep"></div>
+<div class="ctx-item" onclick="ctxAction('info')">📊 Info</div>
+<div class="ctx-item" onclick="ctxAction('chart')">📈 Chart</div>
+<div class="ctx-sep"></div>
+<div class="ctx-item" onclick="ctxAction('copy')">📋 Copy</div>
+<div class="ctx-item" onclick="ctxAction('watch')">⭐ Watch</div>
+</div>
+
+<!-- Command palette -->
+<div class="cmd" id="cmd">
+<input id="cmdInput" placeholder="Type a command..." oninput="filterCmd()" onkeydown="cmdKey(event)">
+<div class="cmd-results" id="cmdResults"></div>
+</div>
+
+<!-- Toasts -->
+<div class="toast-wrap" id="toasts"></div>
+
+<script>
+let ws,D,charts={},selectedSigs=new Set(),ctxTicker='',soundEnabled=true,prevPnl=0;
+const $=id=>document.getElementById(id);
+const fmt=(v,s)=>v==null||isNaN(v)?'--':(s&&v>0?'+':'')+Math.round(v).toLocaleString('ru')+' ₽';
+
+// Sounds
+const sounds={
+  trade:()=>new Audio('data:audio/wav;base64,UklGRl9vT19XQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YU'+btoa(String.fromCharCode(...new Array(1000).fill(0).map((_,i)=>128+100*Math.sin(i*.1)*Math.exp(-i/500))))).play(),
+  alert:()=>new Audio('data:audio/wav;base64,UklGRl9vT19XQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YU'+btoa(String.fromCharCode(...new Array(2000).fill(0).map((_,i)=>128+80*Math.sin(i*.2)*Math.exp(-i/800))))).play(),
+  win:()=>{confetti({particleCount:100,spread:70,origin:{y:.6}});sounds.trade()},
+  loss:()=>document.body.style.animation='shake .3s',
+};
+function playSound(s){if(soundEnabled&&sounds[s])try{sounds[s]()}catch(e){}}
+function toggleSound(){soundEnabled=!soundEnabled;document.querySelector('.sound-btn').classList.toggle('muted',!soundEnabled);toast(soundEnabled?'Sound ON':'Sound OFF');}
+
+// Theme
+function toggleTheme(){
+  const t=document.documentElement.dataset.theme==='light'?'dark':'light';
+  document.documentElement.dataset.theme=t;
+  localStorage.setItem('theme',t);
+  toast('Theme: '+t);
+}
+if(localStorage.getItem('theme')==='light')document.documentElement.dataset.theme='light';
+
+// Fullscreen
+function toggleFullscreen(){
+  if(!document.fullscreenElement)document.documentElement.requestFullscreen();
+  else document.exitFullscreen();
 }
 
+// Charts
+function initCharts(){
+  const cfg=(id,color)=>new Chart($(id),{type:'line',data:{labels:[],datasets:[{data:[],borderColor:color,backgroundColor:color+'33',fill:true,tension:.4,pointRadius:0,borderWidth:2}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{mode:'index',intersect:false}},scales:{x:{display:false},y:{grid:{color:'#252535'},ticks:{font:{size:9}}}},interaction:{intersect:false,mode:'index'}}});
+  charts.eq=cfg('eqChart','#40c4ff');
+}
+function updateChart(chart,data){
+  chart.data.labels=data.map((_,i)=>i);
+  chart.data.datasets[0].data=data;
+  chart.update('none');
+}
+function zoomChart(id,dir){
+  const wrap=$(id+'Wrap');
+  const h=parseInt(getComputedStyle(wrap).height);
+  wrap.style.height=(dir==='in'?h+50:Math.max(80,h-50))+'px';
+  charts[id]?.resize();
+}
+function expandChart(id){$(id+'Wrap').classList.toggle('expanded');charts[id]?.resize();}
+
+// WebSocket
+function connect(){
+  ws=new WebSocket((location.protocol==='https:'?'wss:':'ws:')+'//'+location.host+'/ws');
+  ws.onopen=()=>{
+    $('ws').className='dot on';$('wsDot').className='dot on';$('wsStatus').textContent='Connected';
+    toast('Connected','success');
+    setTimeout(()=>$('loading').classList.add('done'),500);
+    setInterval(()=>ws?.readyState===1&&ws.send('ping'),20000);
+  };
+  ws.onclose=()=>{
+    $('ws').className='dot off';$('wsDot').className='dot off';$('wsStatus').textContent='Disconnected';
+    setTimeout(connect,3000);
+  };
+  ws.onmessage=e=>{
+    const d=JSON.parse(e.data);
+    if(d.t==='u'){D=d;render(d)}
+    else if(d.t==='e')handleEvent(d);
+  };
+}
+
+function handleEvent(e){
+  if(e.ch==='trades'){
+    toast('Trade: '+e.d?.ticker,'success');
+    playSound('trade');
+  }else if(e.ch==='alerts'){
+    toast(e.d?.title||'Alert',e.d?.severity||'warning');
+    playSound('alert');
+  }
+}
+
+// Render
 function render(d){
-$('tm').textContent=new Date().toLocaleTimeString();
-const p=d.port||{},m=d.m||{},sys=d.sys||{},brain=d.brain||{};
+  $('time').textContent=new Date().toLocaleTimeString();
+  const p=d.port||{},m=d.m||{},brain=d.brain||{},auto=d.auto||{};
 
-const bal=p.total_value||0;
-$('bal').textContent=bal>0?fmt(bal):'--';
-const pnl=p.unrealized_pnl||m.pnl||0;
-$('pnl').textContent=fmt(pnl,true);$('pnl').className=pnl>=0?'g':'r';
-$('fPnl').textContent=fmt(pnl,true);$('fPnl').className=pnl>=0?'g':'r';
+  // Balance with animation
+  const bal=p.total_value||0;
+  $('bal').textContent=fmt(bal);
+  
+  const pnl=p.unrealized_pnl||0;
+  $('pnl').textContent=fmt(pnl,true);
+  $('pnl').className=pnl>=0?'g':'r';
+  
+  // Animate PnL changes
+  if(pnl!==prevPnl){
+    if(pnl>prevPnl&&pnl>0)$('bal').classList.add('pulse');
+    else if(pnl<prevPnl&&pnl<0)$('bal').classList.add('shake');
+    setTimeout(()=>$('bal').classList.remove('pulse','shake'),500);
+    
+    // Win/loss effects
+    if(pnl>prevPnl+1000)playSound('win');
+    else if(pnl<prevPnl-1000)playSound('loss');
+    prevPnl=pnl;
+  }
 
-const dd=m.dd||0;
-$('dd').textContent=dd.toFixed(1)+'%';$('dd').className='val '+(dd>5?'r':dd>2?'y':'g');
-$('mdd').textContent=(m.maxDd||0).toFixed(1)+'%';
-$('rLvl').textContent=dd>5?'HIGH':dd>2?'MED':'LOW';$('rLvl').className='badge '+(dd>5?'r':dd>2?'y':'g');
+  const dd=m.dd||0;
+  $('dd').textContent=dd.toFixed(1)+'%';
+  $('dd').className='val '+(dd>5?'r':dd>2?'y':'g');
+  $('mdd').textContent=(m.maxDd||0).toFixed(1)+'%';
+  $('rLvl').textContent=dd>5?'HIGH':dd>2?'MED':'LOW';
+  $('rLvl').className='badge '+(dd>5?'r':dd>2?'y':'g');
 
-$('wr').textContent=((m.wr||0)*100).toFixed(0)+'%';
-$('wN').textContent=m.w||0;$('lN').textContent=m.l||0;
-$('sh').textContent=(m.sharpe||0).toFixed(2);
-$('pf').textContent=(m.pf||0).toFixed(2);
+  $('wr').textContent=((m.wr||0)*100).toFixed(0)+'%';
+  $('wN').textContent=m.w||0;$('lN').textContent=m.l||0;
+  $('sh').textContent=(m.sharpe||0).toFixed(2);
+  $('pf').textContent=(m.pf||0).toFixed(2);
+  $('fSig').textContent=m.sigN||0;
+  $('posN').textContent=m.posN||0;
 
-$('wsN').textContent=sys.ws||0;
-$('cacheR').textContent=((sys.cache?.r||0)*100).toFixed(0)+'%';
-$('up').textContent=fmtT(sys.up||0);
-$('fSig').textContent=m.sigN||0;
+  // Fear & Greed
+  const fg=brain.fg||50;
+  $('fgV').textContent=Math.round(fg);
+  $('fFg').textContent=Math.round(fg);
+  $('fgEmo').textContent=brain.fgEmo||'neutral';
+  $('fgN').style.transform=`rotate(${(fg/100)*180-90}deg)`;
+  const fgC=fg<30?'r':fg<45?'o':fg<55?'y':fg<70?'b':'g';
+  $('fgV').className='gauge-val '+fgC;
+  $('fFg').className=fgC;
 
-const fg=brain.fg||50;
-const fgEmo=brain.fgEmo||'neutral';
-$('fgVal').textContent=Math.round(fg);
-$('fgMain').textContent=Math.round(fg);
-$('fgBadge').textContent=Math.round(fg);
-$('fFg').textContent=Math.round(fg);
-$('fgEmo').textContent=fgEmo;
-$('fgEmoMain').textContent=fgEmo;
-$('fgNeedle').style.transform=`rotate(${(fg/100)*180-90}deg)`;
+  // Regime
+  $('regime').textContent=brain.regime||'--';
+  const regC={'crisis':'r','trending_down':'o','sideways':'y','trending_up':'g'};
+  $('regime').className='badge '+(regC[brain.regime]||'');
 
-const fgColor=fg<30?'r':fg<45?'o':fg<55?'y':fg<70?'b':'g';
-$('fgVal').className='gauge-val '+fgColor;
-$('fgMain').className='mini-v '+fgColor;
-$('fFg').className=fgColor;
+  // Automation
+  $('autoSwitch').className='switch'+(auto.enabled?' on':'');
+  $('autoRegime').textContent=auto.regime||'--';
+  $('autoPos').textContent=auto.positions||0;
+  $('autoTrades').textContent=auto.daily_trades||0;
+  $('fAuto').textContent=auto.enabled?'ON':'OFF';
+  $('fAuto').className=auto.enabled?'g':'r';
 
-const regime=brain.regime||'sideways';
-$('regime').textContent=regime;
-$('regimeMain').textContent=regime;
-const regimeColors={'crisis':'r','trending_down':'o','sideways':'y','trending_up':'g','high_vol':'p'};
-$('regime').className='badge '+(regimeColors[regime]||'');
-$('regimeMain').className='mini-v '+(regimeColors[regime]||'b');
+  // Charts
+  const h=m.hist||{};
+  if(h.eq?.length)updateChart(charts.eq,h.eq);
 
-$('cfgConf').textContent=((brain.minConf||0.45)*100).toFixed(0)+'%';
-$('cfgPos').textContent=((brain.maxPos||0.1)*100).toFixed(0)+'%';
-$('cfgTrades').textContent=brain.maxTrades||20;
-const model=brain.model||{};
-$('modelVer').textContent=model.version||'--';
-$('modelAcc').textContent=model.accuracy?((model.accuracy*100).toFixed(1)+'%'):'--';
-$('modelAcc').className=model.accuracy>0.5?'g':model.accuracy>0.4?'y':'r';
-$('modelFeat').textContent=model.features||'--';
-$('modelReady').innerHTML=model.ready?'<span class=\"g\">✓ Yes</span>':'<span class=\"r\">✗ No</span>';
+  // Ticker tape
+  renderTape(d.prices||{});
+  
+  renderSigs(d.signals||[]);
+  renderPos(d.pos||[]);
+  updateTimer();
+}
 
-const comps=brain.fgComp||{};
-$('fgComps').innerHTML=Object.entries(comps).map(([k,v])=>{
-const c=v<30?'#ff5555':v<45?'#ff9100':v<55?'#888':v<70?'#40c4ff':'#00e676';
-return`<div style="margin:6px 0"><div style="display:flex;justify-content:space-between;font-size:10px"><span>${k}</span><span>${Math.round(v)}</span></div><div class="comp-bar"><div class="comp-fill" style="width:${v}%;background:${c}"></div></div></div>`;
-}).join('');
-
-const h=m.hist||{};
-line($('eqC'),h.eq||[]);
-line($('ddC'),h.dd||[],1);
-line($('fgC'),brain.fgHist||[],0,'#ffd740');
-line($('fgHist'),brain.fgHist||[],0,'#e040fb');
-
-renderSigs(d.signals||[]);
-renderTrades(d.trades||[]);
-renderPos(d.pos||[]);
-renderAlerts(d.alerts||[]);
-renderSvcs(sys.cb||{});
-renderTop(m.topTk||[]);
+function renderTape(prices){
+  const items=Object.entries(prices).slice(0,20).map(([tk,p])=>{
+    if(typeof p!=='object')return'';
+    const ch=p.change||p.change_pct||0;
+    return`<div class="tape-item" onclick="showTicker('${tk}')" oncontextmenu="showCtx(event,'${tk}')">
+      <span class="tape-tk">${tk}</span>
+      <span class="tape-ch ${ch>=0?'g':'r'}">${ch>=0?'+':''}${ch.toFixed(2)}%</span>
+    </div>`;
+  }).join('');
+  $('tapeInner').innerHTML=items+items; // duplicate for seamless scroll
 }
 
 function renderSigs(sigs){
-let f=sigs.filter(s=>!q||s.ticker?.toLowerCase().includes(q));
-if(flt==='buy')f=f.filter(s=>s.signal>0);else if(flt==='sell')f=f.filter(s=>s.signal<0);
-$('sc').textContent=f.length;
-const html=s=>`<div class="sig" onclick="showTk('${s.ticker}')"><span class="sig-tk">${s.ticker}</span><span class="tag ${s.signal>0?'buy':'sell'}">${s.signal>0?'BUY':'SELL'} ${((s.confidence||0)*100).toFixed(0)}%</span></div>`;
-$('sigs').innerHTML=f.slice(0,15).map(html).join('');
-$('allSigs').innerHTML=f.map(html).join('');
-}
-
-function renderTrades(t){
-$('tbl').innerHTML=t.filter(x=>!q||x.ticker?.toLowerCase().includes(q)).slice(0,100).map(x=>`<tr><td><b>${x.ticker||'--'}</b></td><td><span class="tag ${x.side==='buy'?'buy':'sell'}">${x.side||'--'}</span></td><td>${x.quantity||0}</td><td>${fmt(x.price)}</td><td class="${(x.pnl||0)>=0?'g':'r'}">${fmt(x.pnl,1)}</td><td style="color:var(--txt2)">${x.timestamp?new Date(x.timestamp).toLocaleTimeString():'--'}</td></tr>`).join('');
+  let f=sigs.filter(s=>s.signal!=0).sort((a,b)=>Math.abs(b.confidence||0)-Math.abs(a.confidence||0));
+  $('sc').textContent=f.length;
+  $('sigs').innerHTML=f.slice(0,15).map(s=>{
+    const sel=selectedSigs.has(s.ticker)?'selected':'';
+    return`<div class="sig ${sel}" draggable="true" onclick="toggleSig('${s.ticker}')" oncontextmenu="showCtx(event,'${s.ticker}')" ondragstart="dragSig(event,'${s.ticker}')">
+      <span><input type="checkbox" ${sel?'checked':''} onclick="event.stopPropagation();toggleSig('${s.ticker}')"> <b>${s.ticker}</b></span>
+      <span class="tag ${s.signal>0?'buy':'sell'}">${s.signal>0?'BUY':'SELL'} ${((s.confidence||0)*100).toFixed(0)}%</span>
+    </div>`;
+  }).join('');
 }
 
 function renderPos(p){
-$('positions').innerHTML=p.length?p.map(x=>{const pnl=x.unrealized_pnl||0;return`<div class="pos"><div class="pos-h"><span class="pos-tk">${x.ticker}</span><span class="${pnl>=0?'g':'r'}">${fmt(pnl,1)}</span></div><div style="font-size:9px;color:var(--txt2)">${x.quantity} × ${fmt(x.current_price)}</div></div>`}).join(''):'<div style="color:var(--txt2)">No positions</div>';
+  $('positions').innerHTML=p.length?p.map(x=>`<div class="pos ${x.unrealized_pnl>=0?'profit':'loss'}" onclick="showPosDetail('${x.ticker}')" oncontextmenu="showCtx(event,'${x.ticker}')">
+    <button class="pos-close" onclick="event.stopPropagation();closePos('${x.ticker}')">×</button>
+    <div class="pos-h"><span class="pos-tk">${x.ticker}</span><span class="${x.unrealized_pnl>=0?'g':'r'}">${fmt(x.unrealized_pnl,1)}</span></div>
+    <div style="font-size:10px;color:var(--txt2);margin-top:4px">${x.quantity} × ${fmt(x.current_price)} <span class="${x.pnl_pct>=0?'g':'r'}">(${x.pnl_pct>=0?'+':''}${x.pnl_pct?.toFixed(1)}%)</span></div>
+  </div>`).join(''):'<div style="color:var(--txt2);padding:12px;text-align:center">No positions<br><small>Drag signals here</small></div>';
+  
+  // Drop zone for signals
+  $('positions').ondragover=e=>{e.preventDefault();e.currentTarget.style.background='var(--bg4)'};
+  $('positions').ondragleave=e=>e.currentTarget.style.background='';
+  $('positions').ondrop=e=>{e.preventDefault();e.currentTarget.style.background='';const tk=e.dataTransfer.getData('ticker');if(tk)quickOrder(tk,'buy')};
 }
 
-function renderTop(tk){$('topTk').innerHTML=tk.length?tk.slice(0,5).map(([n,s])=>`<div class="pos"><div class="pos-h"><span class="pos-tk">${n}</span><span class="${s.pnl>=0?'g':'r'}">${fmt(s.pnl,1)}</span></div></div>`).join(''):'--';}
-function renderAlerts(a){$('alerts').innerHTML=a.length?a.slice(0,6).map(x=>`<div class="alert ${x.sev==='error'?'e':x.sev==='warning'?'w':''}">${x.title}</div>`).join(''):'<div style="color:var(--txt2)">No alerts</div>';}
-function renderSvcs(cb){$('svcs').innerHTML=Object.entries(cb).map(([n,s])=>`<span class="svc ${s}">${n}</span>`).join('');}
+// Drag & Drop
+function dragSig(e,tk){e.dataTransfer.setData('ticker',tk)}
+let draggedCard=null;
+document.querySelectorAll('.card[draggable]').forEach(card=>{
+  card.ondragstart=e=>{draggedCard=card;card.classList.add('dragging')};
+  card.ondragend=()=>{draggedCard?.classList.remove('dragging');draggedCard=null};
+  card.ondragover=e=>{e.preventDefault();if(draggedCard&&draggedCard!==card)card.classList.add('drag-over')};
+  card.ondragleave=()=>card.classList.remove('drag-over');
+  card.ondrop=e=>{
+    e.preventDefault();card.classList.remove('drag-over');
+    if(draggedCard&&draggedCard!==card){
+      const parent=card.parentNode;
+      const cards=[...parent.children];
+      const fromIdx=cards.indexOf(draggedCard);
+      const toIdx=cards.indexOf(card);
+      if(fromIdx<toIdx)card.after(draggedCard);else card.before(draggedCard);
+    }
+  };
+});
 
-function line(c,data,inv=0,clr=null){
-if(!c||!data.length)return;
-const ctx=c.getContext('2d'),w=c.width=c.offsetWidth*2,h=c.height=c.offsetHeight*2;
-ctx.scale(2,2);const W=w/2,H=h/2;
-const max=Math.max(...data)||1,min=Math.min(...data);
-ctx.clearRect(0,0,W,H);ctx.beginPath();
-data.forEach((v,i)=>{const x=i/(data.length-1)*W,y=H-((v-min)/(max-min||1))*H*.85;i?ctx.lineTo(x,y):ctx.moveTo(x,y)});
-ctx.strokeStyle=clr||(inv?'#ff5555':'#00e676');ctx.lineWidth=1.5;ctx.stroke();
+// Market timer
+function updateTimer(){
+  const now=new Date();
+  const h=now.getHours(),m=now.getMinutes();
+  const isOpen=(now.getDay()>0&&now.getDay()<6)&&(h>=10&&(h<18||(h===18&&m<=45)));
+  const timer=$('timer');
+  timer.className='timer '+(isOpen?'open':'closed');
+  
+  if(isOpen){
+    const closeTime=new Date(now);closeTime.setHours(18,45,0);
+    const diff=closeTime-now;
+    const mins=Math.floor(diff/60000);
+    const hrs=Math.floor(mins/60);
+    $('timerText').textContent=`Closes in ${hrs}h ${mins%60}m`;
+  }else{
+    $('timerText').textContent='Market Closed';
+  }
 }
 
-function fmtT(s){return s<60?s+'s':s<3600?Math.round(s/60)+'m':Math.round(s/3600)+'h'}
-function refresh(){ws?.readyState===1&&ws.send('{"a":"r"}')}
-function filter(){q=$('q').value.toLowerCase();flt=$('f').value;D&&(renderSigs(D.signals||[]),renderTrades(D.trades||[]))}
-function showTk(tk){$('mT').textContent=tk;const s=D?.signals?.find(x=>x.ticker===tk);$('mB').innerHTML=s?`<div><span class="tag ${s.signal>0?'buy':'sell'}">${s.signal>0?'BUY':'SELL'}</span> ${((s.confidence||0)*100).toFixed(0)}%<div style="margin-top:8px">Price: ${fmt(s.price)}</div></div>`:'No data';$('modal').classList.add('on');}
-function closeM(){$('modal').classList.remove('on')}
-function exp(){window.open('/api/export?fmt=csv')}
-
-async function brainCorrect(){
-toast('Running auto-correction...');
-const r=await fetch('/api/brain/correct',{method:'POST'}).then(r=>r.json());
-if(r.corrections?.length){toast('✅ '+r.corrections.length+' corrections','g');}else{toast('No corrections needed','y');}
+// API
+async function toggleAuto(){
+  const cur=D?.auto?.enabled||false;
+  const res=await fetch('/api/auto/toggle?enabled='+(!cur),{method:'POST'}).then(r=>r.json());
+  if(!res.error)toast(res.enabled?'Automation ON 🚀':'Automation OFF','success');
+  else toast(res.error,'error');
 }
 
-async function brainRetrain(){
-toast('Starting retrain...');
-const r=await fetch('/api/brain/retrain',{method:'POST'}).then(r=>r.json());
-if(r.triggered){toast('✅ Retrain started','g');}else{toast('Retrain on cooldown','y');}
+async function forceCycle(){
+  toast('Starting cycle...');
+  playSound('trade');
+  await fetch('/api/auto/cycle',{method:'POST'});
+  toast('Cycle started','success');
 }
 
-async function analyzeTk(){
-const tk=$('analysisTk').value;
-$('analysisResult').innerHTML='Loading...';
-const r=await fetch('/api/brain/analysis/'+tk).then(r=>r.json());
-if(r.error){$('analysisResult').innerHTML='Error: '+r.error;return;}
-const liq=r.liquidity||{};
-const corr=r.correlation||{};
-const patterns=r.patterns||[];
-$('analysisResult').innerHTML=`
-<div class="grid" style="grid-template-columns:1fr 1fr 1fr;gap:8px">
-<div class="mini"><div class="mini-v b">${(liq.liquidity_score||0).toFixed(1)}%</div><div class="mini-l">Liquidity</div></div>
-<div class="mini"><div class="mini-v">${((liq.bid_ask_spread_pct||0)*100).toFixed(2)}%</div><div class="mini-l">Spread</div></div>
-<div class="mini"><div class="mini-v y">${(corr.beta||1).toFixed(2)}</div><div class="mini-l">Beta</div></div>
-</div>
-<div style="margin-top:10px"><b>Correlations:</b></div>
-<div style="font-size:10px;color:var(--txt2)">${Object.entries(corr.correlations||{}).slice(0,5).map(([k,v])=>`${k}: ${v}`).join(', ')||'--'}</div>
-<div style="margin-top:10px"><b>Patterns:</b></div>
-<div>${patterns.length?patterns.map(p=>`<span class="tag ${p.signal}">${p.name} (${((p.strength||0)*100).toFixed(0)}%)</span> `).join(''):'<span style="color:var(--txt2)">No patterns</span>'}</div>`;
+async function emergencyStop(){
+  if(!confirm('⚠️ Stop all trading?'))return;
+  await fetch('/api/auto/toggle?enabled=false',{method:'POST'});
+  toast('Emergency stop!','error');
+  playSound('alert');
 }
 
-function toast(msg,c=''){const t=document.createElement('div');t.className='toast '+c;t.textContent=msg;$('toast').appendChild(t);setTimeout(()=>t.remove(),3000);}
+async function quickTrade(side){
+  const tk=$('qtTicker').value.trim().toUpperCase();
+  const qty=parseInt($('qtQty').value)||1;
+  if(!tk){toast('Enter ticker','warning');return}
+  
+  addRipple(event.target);
+  const res=await fetch(`/api/order?ticker=${tk}&side=${side}&qty=${qty}`,{method:'POST'}).then(r=>r.json());
+  if(res.error)toast(res.error,'error');
+  else{toast(`${side.toUpperCase()} ${qty} ${tk}`,'success');playSound('trade');$('qtTicker').value=''}
+}
 
-document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{document.querySelectorAll('.tab').forEach(x=>x.classList.remove('on'));document.querySelectorAll('.page').forEach(x=>x.classList.remove('on'));t.classList.add('on');$('p-'+t.dataset.p).classList.add('on')});
-document.addEventListener('keydown',e=>{if(e.key==='Escape')closeM();if(e.key==='r')refresh()});
-$('modal').onclick=e=>e.target===$('modal')&&closeM();
+async function quickOrder(tk,side){
+  const res=await fetch(`/api/order?ticker=${tk}&side=${side}&qty=1`,{method:'POST'}).then(r=>r.json());
+  toast(res.error||`${side.toUpperCase()} ${tk}`);
+  playSound('trade');
+}
+
+async function closePos(tk){
+  if(!confirm(`Close ${tk}?`))return;
+  await fetch(`/api/close?ticker=${tk}`,{method:'POST'});
+  toast(`Closed ${tk}`);
+}
+
+async function showTicker(tk){
+  const res=await fetch(`/api/ticker/${tk}`).then(r=>r.json());
+  openModal(tk,`
+    <div class="row">
+      <div class="mini"><div class="mini-v">${fmt(res.price?.price)}</div><div class="mini-l">Price</div></div>
+      <div class="mini"><div class="mini-v ${(res.price?.change||0)>=0?'g':'r'}">${((res.price?.change||0)).toFixed(2)}%</div><div class="mini-l">Change</div></div>
+    </div>
+    <div style="margin-top:14px">Stats: <b>${res.stats?.n||0}</b> trades, PnL: <b class="${(res.stats?.pnl||0)>=0?'g':'r'}">${fmt(res.stats?.pnl)}</b></div>
+    <div style="margin-top:14px;display:flex;gap:10px">
+      <button class="btn success" style="flex:1" onclick="quickOrder('${tk}','buy');closeModal()">🟢 BUY</button>
+      <button class="btn danger" style="flex:1" onclick="quickOrder('${tk}','sell');closeModal()">🔴 SELL</button>
+    </div>
+  `);
+}
+
+function showPosDetail(tk){showTicker(tk)}
+function showFGDetail(){
+  openModal('Fear & Greed Index',`
+    <div class="gauge" style="margin:20px auto">
+      <div class="gauge-bg"></div>
+      <div class="gauge-needle" style="transform:rotate(${(D.brain.fg/100)*180-90}deg)"></div>
+      <div class="gauge-val">${D.brain.fg}</div>
+    </div>
+    <div style="text-align:center;margin-top:40px">
+      <div style="font-size:18px;font-weight:700">${D.brain.fgEmo}</div>
+      <div style="margin-top:10px;color:var(--txt2)">History: ${D.brain.fgHist?.slice(-10).join(' → ')}</div>
+    </div>
+  `);
+}
+
+// Interactions
+function toggleSig(tk){selectedSigs.has(tk)?selectedSigs.delete(tk):selectedSigs.add(tk);render(D)}
+function executeSelected(){
+  if(!selectedSigs.size){toast('Select signals first','warning');return}
+  if(!confirm(`Execute ${selectedSigs.size} orders?`))return;
+  selectedSigs.forEach(async tk=>{
+    const sig=D.signals.find(s=>s.ticker===tk);
+    if(sig)await fetch(`/api/order?ticker=${tk}&side=${sig.signal>0?'buy':'sell'}&qty=1`,{method:'POST'});
+  });
+  toast(`Executing ${selectedSigs.size} orders`,'success');
+  playSound('trade');
+  selectedSigs.clear();
+}
+
+function filterTrades(type){toast('Filter: '+type)}
+
+// Quick trade widget toggle
+function toggleQT(){$('qt').classList.toggle('on')}
+function qtKey(e){if(e.key==='Enter')quickTrade('buy');if(e.key==='Escape')toggleQT()}
+
+// Context menu
+function showCtx(e,tk){
+  e.preventDefault();
+  ctxTicker=tk;
+  const ctx=$('ctx');
+  ctx.style.left=Math.min(e.clientX,window.innerWidth-170)+'px';
+  ctx.style.top=Math.min(e.clientY,window.innerHeight-200)+'px';
+  ctx.classList.add('on');
+}
+function ctxAction(act){
+  $('ctx').classList.remove('on');
+  if(act==='buy')quickOrder(ctxTicker,'buy');
+  else if(act==='sell')quickOrder(ctxTicker,'sell');
+  else if(act==='info')showTicker(ctxTicker);
+  else if(act==='copy'){navigator.clipboard.writeText(ctxTicker);toast('Copied: '+ctxTicker)}
+  else if(act==='watch')toast('Added to watchlist: '+ctxTicker);
+}
+
+// Command palette
+const commands=[
+  {name:'Toggle Automation',icon:'🤖',key:'A',action:toggleAuto},
+  {name:'Force Cycle',icon:'▶',key:'C',action:forceCycle},
+  {name:'Quick Trade',icon:'💱',key:'T',action:toggleQT},
+  {name:'Emergency Stop',icon:'🛑',key:'S',action:emergencyStop},
+  {name:'Toggle Theme',icon:'🌓',key:'D',action:toggleTheme},
+  {name:'Toggle Sound',icon:'🔊',key:'M',action:toggleSound},
+  {name:'Fullscreen',icon:'⛶',key:'F',action:toggleFullscreen},
+  {name:'Refresh',icon:'🔄',key:'R',action:()=>ws?.send(JSON.stringify({a:'r'}))},
+];
+let cmdIdx=0;
+function showCmd(){
+  $('cmd').classList.add('on');
+  $('cmdInput').value='';
+  $('cmdInput').focus();
+  renderCmd(commands);
+}
+function hideCmd(){$('cmd').classList.remove('on')}
+function renderCmd(cmds){
+  cmdIdx=0;
+  $('cmdResults').innerHTML=cmds.map((c,i)=>`<div class="cmd-item${i===0?' active':''}" onclick="runCmd(${i})" onmouseover="cmdIdx=${i};renderCmd(window.filteredCmds||commands)">
+    <span>${c.icon}</span><span>${c.name}</span><kbd>${c.key}</kbd>
+  </div>`).join('');
+  window.filteredCmds=cmds;
+}
+function filterCmd(){
+  const q=$('cmdInput').value.toLowerCase();
+  const filtered=commands.filter(c=>c.name.toLowerCase().includes(q));
+  renderCmd(filtered);
+}
+function cmdKey(e){
+  const cmds=window.filteredCmds||commands;
+  if(e.key==='ArrowDown'){cmdIdx=Math.min(cmdIdx+1,cmds.length-1);renderCmd(cmds)}
+  else if(e.key==='ArrowUp'){cmdIdx=Math.max(cmdIdx-1,0);renderCmd(cmds)}
+  else if(e.key==='Enter'){runCmd(cmdIdx)}
+  else if(e.key==='Escape')hideCmd();
+}
+function runCmd(i){
+  const cmds=window.filteredCmds||commands;
+  cmds[i]?.action();
+  hideCmd();
+}
+
+// Modal
+function openModal(title,content){$('mT').textContent=title;$('mB').innerHTML=content;$('modal').classList.add('on')}
+function closeModal(){$('modal').classList.remove('on')}
+
+// Toast
+function toast(msg,type='info'){
+  const t=document.createElement('div');
+  t.className='toast '+type;
+  t.innerHTML=`<span class="toast-icon">${type==='success'?'✅':type==='error'?'❌':type==='warning'?'⚠️':'ℹ️'}</span><span>${msg}</span>`;
+  t.onclick=()=>{t.classList.add('out');setTimeout(()=>t.remove(),300)};
+  $('toasts').appendChild(t);
+  setTimeout(()=>{t.classList.add('out');setTimeout(()=>t.remove(),300)},4000);
+}
+
+// Ripple effect
+function addRipple(el){
+  const r=document.createElement('span');
+  r.className='ripple';
+  r.style.left=event.offsetX+'px';
+  r.style.top=event.offsetY+'px';
+  el.appendChild(r);
+  setTimeout(()=>r.remove(),600);
+}
+
+// Keyboard shortcuts
+document.addEventListener('keydown',e=>{
+  if(e.target.tagName==='INPUT')return;
+  if(e.ctrlKey&&e.key==='k'){e.preventDefault();showCmd()}
+  else if(e.key==='t'||e.key==='T')toggleQT();
+  else if(e.key==='Escape'){closeModal();hideCmd();$('ctx').classList.remove('on');$('qt').classList.remove('on')}
+});
+
+// Touch gestures (swipe to refresh)
+let touchStart=0;
+document.addEventListener('touchstart',e=>touchStart=e.touches[0].clientY);
+document.addEventListener('touchend',e=>{
+  const diff=e.changedTouches[0].clientY-touchStart;
+  if(diff>100&&window.scrollY===0){ws?.send(JSON.stringify({a:'r'}));toast('Refreshing...')}
+});
+
+// Close menus on click outside
+document.addEventListener('click',e=>{
+  if(!e.target.closest('.ctx'))$('ctx').classList.remove('on');
+  if(!e.target.closest('.cmd')&&!e.target.closest('[onclick*="showCmd"]'))hideCmd();
+});
+
+// Init
+initCharts();
 connect();
+setInterval(updateTimer,60000);
 </script>
 </body>
 </html>'''
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8080")))
+    uvicorn.run(app, host="0.0.0.0", port=8080)

@@ -200,12 +200,30 @@ class Strategy:
         ind = self.calc_indicators(history)
         
         ml_signal, ml_conf = 0, 0
+        # RSI fallback
+        rsi = ind.get("rsi_14", 50) if ind else 50
+        if rsi < 35: ml_signal, ml_conf = 1, 0.55
+        elif rsi > 65: ml_signal, ml_conf = -1, 0.55
+        elif rsi < 45: ml_signal, ml_conf = 1, 0.40
+        elif rsi > 55: ml_signal, ml_conf = -1, 0.40
         box_result = None
         
         # ML Strategy
         if self.strategy_mode in ["ml", "combined"] and ML_AVAILABLE and ml_predictor_v3 and ind:
             pred = ml_predictor_v3.predict(ind)
             ml_signal, ml_conf = pred.signal, pred.confidence
+        
+        # RSI fallback - если ML не дал сигнала
+        if ml_signal == 0 and ind:
+            rsi = ind.get('rsi_14', 50)
+            if rsi < 30:
+                ml_signal, ml_conf = 1, 0.60
+            elif rsi > 70:
+                ml_signal, ml_conf = -1, 0.60
+            elif rsi < 40:
+                ml_signal, ml_conf = 1, 0.45
+            elif rsi > 60:
+                ml_signal, ml_conf = -1, 0.45
         
         # Boxing Strategy
         if self.strategy_mode in ["boxing", "combined"]:

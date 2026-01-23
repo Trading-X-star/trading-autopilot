@@ -101,12 +101,9 @@ services:
       <<: *env
       TINKOFF_TOKEN_FILE: /run/secrets/tinkoff_token
       TINKOFF_SANDBOX: "true"
-      AUTO_EXECUTE: "true"
+      AUTO_EXECUTE: "false"
     secrets:
-      - source: tinkoff_token
-        uid: "100"
-        gid: "101"
-        mode: 0400
+      - tinkoff_token
     ports: ["8007:8007"]
     depends_on:
       redis: {condition: service_healthy}
@@ -193,6 +190,57 @@ services:
     depends_on:
       postgres: {condition: service_healthy}
 
+networks:
+  trading-net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+  models_data:
+
+secrets:
+  tinkoff_token:
+    file: ./secrets/tinkoff_token.txt
+
+  automation:
+    build: ./services/automation
+    container_name: automation
+    restart: unless-stopped
+    ports:
+      - "8025:8025"
+    environment:
+      - AUTO_TRADE_ENABLED=true
+    networks:
+      - trading-net
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8025/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+    build: ./services/automation-v2
+    container_name: automation-v2
+    restart: unless-stopped
+    ports:
+      - "8030:8030"
+    environment:
+      - AUTO_TRADE=true
+    networks:
+      - trading-net
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8030/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   automation-v2:
     build: ./services/automation-v2
@@ -209,20 +257,3 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-
-networks:
-  trading-net:
-    driver: bridge
-
-volumes:
-  models_data:
-  postgres_data:
-  redis_data:
-  qdrant_data:
-  neo4j_data:
-  grafana_data:
-  prometheus_data:
-
-secrets:
-  tinkoff_token:
-    file: ./secrets/tinkoff_token.txt

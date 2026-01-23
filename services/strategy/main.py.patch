@@ -1,0 +1,11 @@
+# В функции analyze, после ml_signal, ml_conf = 0, 0 добавить:
+# RSI fallback
+rsi = ind.get('rsi_14', 50) if ind else 50
+if rsi < 35:
+    ml_signal, ml_conf = 1, 0.55
+elif rsi > 65:
+    ml_signal, ml_conf = -1, 0.55
+elif rsi < 45:
+    ml_signal, ml_conf = 1, 0.40
+elif rsi > 55:
+    ml_signal, ml_conf = -1, 0.40

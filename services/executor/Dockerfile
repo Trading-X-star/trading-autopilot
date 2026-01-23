@@ -6,8 +6,16 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 EXPOSE 8007
 RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
-USER appuser
+#USER appuser
 
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 CMD curl -f http://localhost:8080/health || exit 1
 
 CMD ["python", "main.py"]
+
+# Install su-exec for privilege drop
+RUN apk add --no-cache su-exec || apt-get update && apt-get install -y gosu && ln -s /usr/sbin/gosu /usr/local/bin/su-exec
+
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]

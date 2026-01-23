@@ -18,6 +18,14 @@ from prometheus_client import Counter, Gauge, make_asgi_app
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("executor")
+# Тикеры, разрешённые для торговли через Tinkoff Sandbox API
+ALLOWED_TICKERS = {
+    "SBER", "GAZP", "LKOH", "YNDX", "GMKN", "NVTK", "ROSN", 
+    "MGNT", "PLZL", "VTBR", "MTSS", "ALRS", "TATN", "POLY",
+    "PHOR", "IRAO", "PIKK", "RUAL", "TCSG", "OZON", "VKCO",
+    "MAGN", "CBOM", "HYDR", "RTKM", "FEES", "TRNFP", "SGZH"
+}
+
 
 ORDERS_PLACED = Counter("orders_placed_total", "Orders", ["ticker", "side"])
 PORTFOLIO_VALUE = Gauge("portfolio_value_rub", "Portfolio value")
@@ -181,13 +189,27 @@ class ExecutorService:
         self.pg = None
         self.tinkoff = None
         self.running = False
-        self.token = os.getenv("TINKOFF_TOKEN", "")
+
+        # --- Загрузка токена безопасно ---
+        token = os.getenv("TINKOFF_TOKEN", "").strip()
+
+        if not token:
+            token_path = os.getenv("TINKOFF_TOKEN_FILE")
+            if token_path and os.path.exists(token_path):
+                try:
+                    with open(token_path, "r") as f:
+                        token = f.read().strip()
+                    logger.info("Tinkoff token loaded from file")
+                except Exception as e:
+                    logger.error(f"Failed to read Tinkoff token file: {e}")
+
+        self.token = token
         self.sandbox = os.getenv("TINKOFF_SANDBOX", "true").lower() == "true"
         self.auto_execute = os.getenv("AUTO_EXECUTE", "false").lower() == "true"
         self.min_confidence = float(os.getenv("MIN_CONFIDENCE", "0.45"))
         self.max_daily_trades = int(os.getenv("MAX_DAILY_TRADES", "20"))
         self.daily_trades = 0
-        
+
         # Simulation fallback
         self.sim_portfolio = {"cash": 1000000, "positions": {}}
     
@@ -196,7 +218,7 @@ class ExecutorService:
         
         try:
             self.pg = await asyncpg.create_pool(
-                os.getenv("DATABASE_URL", "postgresql://${DB_USER:-trading}:${DB_PASSWORD:-trading123}@${DB_HOST:-postgres}:5432/trading"),
+                os.getenv("DATABASE_URL", "postgresql://trading:trading123@postgres:5432/trading"),
                 min_size=2, max_size=10
             )
             await self._init_db()
@@ -266,9 +288,12 @@ class ExecutorService:
         
         logger.info(f"📨 Signal: {ticker} {sig.upper()} conf={confidence:.1%}")
         
+        if ticker not in ALLOWED_TICKERS:
+            logger.debug(f"⏭️ Skipping {ticker} - not in allowed list")
+            return
         if confidence < self.min_confidence:
             return
-        if not self._is_trading_hours():
+        if not self.sandbox and not self._is_trading_hours():
             return
         if self.daily_trades >= self.max_daily_trades:
             return
@@ -291,8 +316,13 @@ class ExecutorService:
                 result["execution_price"] = api_result.get("executedOrderPrice", {})
                 logger.info(f"✅ Tinkoff order: {result['order_id']}")
             else:
+                # Fallback to simulation if Tinkoff rejects (e.g., outside trading hours)
+                error = api_result.get("error", {})
+                if isinstance(error, dict) and error.get("code") == 3:
+                    logger.info(f"📝 Tinkoff unavailable, falling back to simulation")
+                    return await self._simulate_order(ticker, side, quantity, price, confidence)
                 result["status"] = "error"
-                result["error"] = api_result.get("error")
+                result["error"] = error
                 logger.error(f"❌ Order failed: {result['error']}")
         else:
             # Simulation fallback
