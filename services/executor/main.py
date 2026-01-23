@@ -306,6 +306,21 @@ class ExecutorService:
     async def execute_order(self, ticker: str, side: OrderSide, quantity: int, price: float, confidence: float = 0) -> dict:
         result = {"ticker": ticker, "side": side.value, "quantity": quantity, "price": price}
         
+        # Risk check first
+        try:
+            async with httpx.AsyncClient(timeout=5) as http:
+                risk_resp = await http.post("http://risk-manager:8001/check", json={
+                    "ticker": ticker, "side": side.value, "quantity": quantity,
+                    "price": price, "confidence": confidence
+                })
+                risk = risk_resp.json()
+                if not risk.get("approved", True):
+                    reason = risk.get("reason", "Risk check failed")
+                    logger.warning(f"⛔ Risk rejected {ticker}: {reason}")
+                    return {"status": "rejected", "reason": reason, "ticker": ticker}
+        except Exception as e:
+            logger.debug(f"Risk check skipped: {e}")
+        
         # Try Tinkoff API first
         if self.tinkoff and self.tinkoff.account_id:
             api_result = await self.tinkoff.post_order(ticker, quantity, side.value, price)
