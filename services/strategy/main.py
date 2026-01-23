@@ -33,8 +33,7 @@ except Exception as e:
 #     ml_predictor = None
 
 SIGNALS = Counter("signals_total", "Signals", ["ticker", "signal", "strategy"])
-TICKERS = ["SBER", "GAZP", "LKOH", "ROSN", "NVTK", "GMKN", "PLZL", "MGNT",
-           "VTBR", "MTSS", "ALRS", "CHMF", "NLMK", "TATN", "SNGS", "MOEX", "AFKS"]
+TICKERS = ["SBER", "VTBR", "ROSN", "ALRS", "MAGN", "HYDR", "RUAL", "SIBN", "PIKK", "MVID"]
 
 
 class BoxingStrategy:

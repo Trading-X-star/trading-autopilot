@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Trading Terminal v9.0 - Ultimate Interactive"""
+"""Trading Terminal v10.0 - With Production/Sandbox Switch"""
 
 import os, json, asyncio, logging, time, statistics
 from datetime import datetime
@@ -84,7 +84,7 @@ class Terminal:
         self.http = httpx.AsyncClient(timeout=8)
         self._run = True
         self._tasks = [asyncio.create_task(self._loop()), asyncio.create_task(self._sub())]
-        log.info("✅ Terminal v9.0 started")
+        log.info("✅ Terminal v10.0 started")
 
     async def stop(self):
         self._run = False
@@ -115,7 +115,6 @@ class Terminal:
     def _parse_positions(self, pos_data):
         if not pos_data: return []
         positions = pos_data if isinstance(pos_data, list) else pos_data.get('positions', [])
-        # Convert dict {ticker: {qty, price}} to list [{ticker, qty, price}]
         if isinstance(positions, dict):
             positions = [{"ticker": k, "quantity": v.get("quantity", 0), "avg_price": v.get("avg_price", 0)} for k, v in positions.items() if v.get("quantity", 0) != 0]
         result = []
@@ -138,6 +137,7 @@ class Terminal:
             self._f(f"{C.DATAFEED}/prices", "feed_p"),
             self._f(f"{C.EXECUTOR}/portfolio", "exec_pf"),
             self._f(f"{C.EXECUTOR}/trades?limit=200", "exec_tr"),
+            self._f(f"{C.EXECUTOR}/mode", "exec_mode"),
             self._f(f"{C.RISK}/health", "risk_h"),
             self._f(f"{C.BRAIN}/sentiment", "brain_fg"),
             self._f(f"{C.BRAIN}/config", "brain_cfg"),
@@ -146,7 +146,7 @@ class Terminal:
             return_exceptions=True
         )
         def sf(v): return {} if isinstance(v, (Exception, type(None))) else v
-        sig, prices, port_raw, trades_raw, risk, sentiment, brain_cfg, auto_st, auto_pos = map(sf, res)
+        sig, prices, port_raw, trades_raw, mode_raw, risk, sentiment, brain_cfg, auto_st, auto_pos = map(sf, res)
 
         sig_l = sig if isinstance(sig, list) else sig.get("signals", [])
         port_d = self._parse_portfolio(port_raw)
@@ -192,6 +192,10 @@ class Terminal:
         long_exp = sum(p.get("market_value", 0) for p in pos_l if p.get("quantity", 0) > 0)
         short_exp = abs(sum(p.get("market_value", 0) for p in pos_l if p.get("quantity", 0) < 0))
 
+        # Trading mode info
+        trading_mode = mode_raw.get("mode", "sandbox")
+        is_sandbox = mode_raw.get("sandbox", True)
+
         return {
             "t": "u", "ts": datetime.utcnow().isoformat() + "Z",
             "signals": sig_l, "prices": prices, "port": port_d, "pos": pos_l, "trades": tr_l,
@@ -201,6 +205,7 @@ class Terminal:
             "auto": {"enabled": auto_st.get("enabled", False), "regime": auto_st.get("regime", "unknown"),
                     "positions": auto_st.get("positions", 0), "daily_trades": auto_st.get("daily_trades", 0),
                     "jobs": auto_st.get("jobs", []), "pos_details": auto_pos if isinstance(auto_pos, dict) else {}},
+            "mode": {"sandbox": is_sandbox, "mode": trading_mode, "limits": mode_raw.get("limits", {})},
             "m": {"dd": round(dd, 2), "maxDd": round(max(self._hist["dd"]) if self._hist["dd"] else 0, 2),
                  "pnl": round(total_pnl, 0), "eq": round(eq, 0), "peakEq": round(self._peak_eq, 0),
                  "wr": round(wr, 3), "pf": round(pf, 2), "sharpe": round(sharpe, 2),
@@ -246,15 +251,33 @@ async def lifespan(app):
     yield
     await term.stop()
 
-app = FastAPI(title="Trading Terminal", version="9.0", lifespan=lifespan)
+app = FastAPI(title="Trading Terminal", version="10.0", lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=500)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 @app.get("/health")
-async def health(): return {"ok": 1, "v": "9.0"}
+async def health(): return {"ok": 1, "v": "10.0"}
 
 @app.get("/api/data")
 async def api_data(): return await term.data()
+
+@app.post("/api/mode/switch")
+async def switch_mode(sandbox: bool = True):
+    """Switch between sandbox and production mode"""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.post(f"{C.EXECUTOR}/mode/switch", json={"sandbox": sandbox})
+            return r.json()
+    except Exception as e: return {"error": str(e)}
+
+@app.get("/api/mode")
+async def get_mode():
+    """Get current trading mode"""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(f"{C.EXECUTOR}/mode")
+            return r.json()
+    except Exception as e: return {"error": str(e), "sandbox": True, "mode": "unknown"}
 
 @app.post("/api/auto/toggle")
 async def auto_toggle(enabled: bool = True):
@@ -322,7 +345,7 @@ HTML = r'''<!DOCTYPE html>
 <html lang="ru">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
-<title>Trading Terminal v9.0</title>
+<title>Trading Terminal v10.0</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
 <style>
@@ -333,7 +356,6 @@ body{font:12px ui-monospace,'SF Mono',Monaco,monospace;background:var(--bg);colo
 ::-webkit-scrollbar{width:5px}::-webkit-scrollbar-thumb{background:var(--brd);border-radius:3px}
 ::selection{background:var(--b);color:#fff}
 
-/* Layout */
 .app{display:grid;grid-template-rows:40px 36px 1fr 28px;height:100vh;height:100dvh}
 .hdr{background:var(--bg2);display:flex;align-items:center;padding:0 12px;border-bottom:1px solid var(--brd);gap:12px}
 .logo{font-weight:700;font-size:14px;color:var(--g);text-shadow:var(--glow) var(--g);cursor:pointer;transition:all .3s}
@@ -342,7 +364,24 @@ body{font:12px ui-monospace,'SF Mono',Monaco,monospace;background:var(--bg);colo
 .hdr-c>*{cursor:pointer;padding:6px 10px;border-radius:6px;transition:all .2s}
 .hdr-c>*:hover{background:var(--bg3)}
 
-/* Ticker tape */
+/* MODE SWITCH - NEW */
+.mode-switch{display:flex;align-items:center;gap:8px;padding:4px 12px;border-radius:8px;border:2px solid var(--brd);cursor:pointer;transition:all .3s;user-select:none}
+.mode-switch.sandbox{border-color:var(--y);background:rgba(255,215,64,.1)}
+.mode-switch.production{border-color:var(--r);background:rgba(255,85,85,.15)}
+.mode-switch:hover{transform:scale(1.05)}
+.mode-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1px}
+.mode-switch.sandbox .mode-label{color:var(--y)}
+.mode-switch.production .mode-label{color:var(--r)}
+.mode-dot{width:10px;height:10px;border-radius:50%;animation:pulse-dot 2s infinite}
+.mode-switch.sandbox .mode-dot{background:var(--y)}
+.mode-switch.production .mode-dot{background:var(--r)}
+@keyframes pulse-dot{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.5;transform:scale(1.2)}}
+
+/* Warning banner for production */
+.prod-warning{display:none;background:linear-gradient(90deg,var(--r),var(--o));color:#fff;text-align:center;padding:4px;font-size:10px;font-weight:700;animation:flash 1s infinite}
+.prod-warning.on{display:block}
+@keyframes flash{0%,100%{opacity:1}50%{opacity:.7}}
+
 .tape{background:var(--bg2);border-bottom:1px solid var(--brd);overflow:hidden;position:relative}
 .tape-inner{display:flex;animation:scroll 30s linear infinite;white-space:nowrap}
 .tape:hover .tape-inner{animation-play-state:paused}
@@ -352,59 +391,29 @@ body{font:12px ui-monospace,'SF Mono',Monaco,monospace;background:var(--bg);colo
 .tape-tk{font-weight:600}
 .tape-ch{font-size:11px}
 
-/* Main */
 .main{display:grid;grid-template-columns:1fr;overflow:hidden;position:relative}
-.main.split{grid-template-columns:1fr 1fr}
-
-/* Panels */
 .panel{background:var(--bg);overflow:auto;padding:10px;position:relative}
-.panel-resize{position:absolute;right:0;top:0;bottom:0;width:5px;cursor:col-resize;background:transparent;z-index:10}
-.panel-resize:hover{background:var(--b)}
-
-/* Cards */
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-bottom:10px}
 .card{background:var(--bg2);border:1px solid var(--brd);border-radius:12px;padding:14px;transition:all .3s;cursor:default;position:relative;overflow:hidden}
-.card::before{content:'';position:absolute;inset:0;background:linear-gradient(135deg,transparent 40%,rgba(64,196,255,.05));opacity:0;transition:opacity .3s}
 .card:hover{border-color:var(--b);transform:translateY(-3px);box-shadow:0 8px 30px rgba(0,0,0,.3)}
-.card:hover::before{opacity:1}
-.card.dragging{opacity:.5;transform:scale(.95)}
-.card.drag-over{border-color:var(--p);border-style:dashed}
 .card-h{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
 .card-t{font-size:9px;color:var(--txt2);text-transform:uppercase;letter-spacing:1px}
 .badge{background:var(--bg4);padding:3px 10px;border-radius:6px;font-size:9px;font-weight:600;transition:all .3s}
 .badge.g{background:rgba(0,230,118,.15);color:var(--g)}.badge.r{background:rgba(255,85,85,.15);color:var(--r)}.badge.y{background:rgba(255,215,64,.15);color:var(--y)}.badge.b{background:rgba(64,196,255,.15);color:var(--b)}
 .val{font-size:26px;font-weight:700;transition:all .5s}
 .val.g{color:var(--g)}.val.r{color:var(--r)}.val.y{color:var(--y)}.val.b{color:var(--b)}.val.p{color:var(--p)}
-.val.pulse{animation:pulse .5s}
-@keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.1)}}
-.val.shake{animation:shake .5s}
-@keyframes shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-5px)}75%{transform:translateX(5px)}}
 .lbl{font-size:10px;color:var(--txt2);margin-top:4px}
 .row{display:flex;gap:8px;margin-top:8px}
 .mini{flex:1;background:var(--bg3);padding:10px;border-radius:8px;text-align:center;cursor:pointer;transition:all .2s}
 .mini:hover{background:var(--bg4);transform:scale(1.03)}
-.mini:active{transform:scale(.97)}
 .mini-v{font-weight:700;font-size:15px}.mini-l{font-size:9px;color:var(--txt2);margin-top:3px}
 
-/* Charts */
 .chart-wrap{position:relative;height:100px;margin-top:10px}
-.chart-wrap.expanded{height:200px}
-.chart-zoom{position:absolute;right:5px;top:5px;display:flex;gap:4px;opacity:0;transition:opacity .2s}
-.card:hover .chart-zoom{opacity:1}
-.chart-zoom button{background:var(--bg4);border:none;color:var(--txt);width:24px;height:24px;border-radius:4px;cursor:pointer;font-size:10px}
-.chart-zoom button:hover{background:var(--b)}
-
-/* Signals */
-.sig{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;background:var(--bg3);border-radius:8px;margin-bottom:4px;cursor:pointer;transition:all .2s;border:1px solid transparent;user-select:none}
+.sig{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;background:var(--bg3);border-radius:8px;margin-bottom:4px;cursor:pointer;transition:all .2s;border:1px solid transparent}
 .sig:hover{background:var(--bg4);transform:translateX(5px);border-color:var(--b)}
-.sig:active{transform:translateX(2px) scale(.98)}
-.sig.selected{border-color:var(--p);background:rgba(224,64,251,.1)}
-.sig[draggable]{cursor:grab}.sig[draggable]:active{cursor:grabbing}
-.tag{padding:4px 10px;border-radius:5px;font-size:9px;font-weight:700;transition:all .2s}
-.tag:hover{transform:scale(1.1)}
+.tag{padding:4px 10px;border-radius:5px;font-size:9px;font-weight:700}
 .tag.buy{background:rgba(0,230,118,.2);color:var(--g)}.tag.sell{background:rgba(255,85,85,.2);color:var(--r)}
 
-/* Positions */
 .pos{background:var(--bg3);padding:12px;border-radius:8px;margin-bottom:5px;cursor:pointer;transition:all .2s;border:1px solid transparent;position:relative}
 .pos:hover{background:var(--bg4);border-color:var(--b)}
 .pos.profit{border-left:3px solid var(--g)}.pos.loss{border-left:3px solid var(--r)}
@@ -412,130 +421,80 @@ body{font:12px ui-monospace,'SF Mono',Monaco,monospace;background:var(--bg);colo
 .pos-close{position:absolute;right:8px;top:8px;width:20px;height:20px;border-radius:50%;background:var(--r);color:#fff;border:none;cursor:pointer;opacity:0;transition:all .2s;font-size:10px}
 .pos:hover .pos-close{opacity:1}
 
-/* Gauge */
 .gauge{position:relative;width:140px;height:70px;margin:0 auto;cursor:pointer}
 .gauge-bg{position:absolute;width:100%;height:100%;border-radius:70px 70px 0 0;background:conic-gradient(from 180deg,var(--r) 0deg,var(--o) 45deg,var(--y) 90deg,var(--g) 135deg,var(--g) 180deg);-webkit-mask:radial-gradient(circle at 50% 100%,transparent 45px,#000 46px);mask:radial-gradient(circle at 50% 100%,transparent 45px,#000 46px)}
-.gauge-needle{position:absolute;width:4px;height:55px;left:calc(50% - 2px);bottom:0;background:linear-gradient(to top,var(--txt),transparent);border-radius:2px;transform-origin:bottom center;transition:transform .8s cubic-bezier(.68,-.55,.27,1.55);filter:drop-shadow(0 0 5px var(--txt))}
+.gauge-needle{position:absolute;width:4px;height:55px;left:calc(50% - 2px);bottom:0;background:linear-gradient(to top,var(--txt),transparent);border-radius:2px;transform-origin:bottom center;transition:transform .8s cubic-bezier(.68,-.55,.27,1.55)}
 .gauge-val{position:absolute;bottom:-25px;width:100%;text-align:center;font-size:20px;font-weight:700}
 .gauge-labels{position:absolute;width:100%;bottom:-8px;display:flex;justify-content:space-between;font-size:8px;color:var(--txt2);padding:0 5px}
 
-/* Quick trade widget */
-.qt{background:var(--bg2);border:1px solid var(--brd);border-radius:12px;padding:12px;position:fixed;bottom:80px;right:20px;width:200px;z-index:100;display:none;box-shadow:0 10px 40px rgba(0,0,0,.5)}
-.qt.on{display:block;animation:slideUp .3s}
-@keyframes slideUp{from{transform:translateY(20px);opacity:0}to{transform:translateY(0);opacity:1}}
-.qt input{width:100%;background:var(--bg3);border:1px solid var(--brd);color:var(--txt);padding:10px;border-radius:6px;font-size:12px;margin-bottom:8px}
-.qt input:focus{border-color:var(--b);outline:none}
-.qt-btns{display:flex;gap:6px}
-.qt-btns button{flex:1;padding:12px;border:none;border-radius:6px;font-weight:700;cursor:pointer;transition:all .2s}
-.qt-btns button:first-child{background:var(--g);color:#000}
-.qt-btns button:last-child{background:var(--r);color:#fff}
-.qt-btns button:hover{transform:scale(1.05)}
-.qt-btns button:active{transform:scale(.95)}
+.switch{position:relative;width:50px;height:26px;background:var(--bg4);border-radius:13px;cursor:pointer;transition:all .3s}
+.switch.on{background:linear-gradient(135deg,var(--g),var(--b))}
+.switch::after{content:'';position:absolute;width:22px;height:22px;background:#fff;border-radius:50%;top:2px;left:2px;transition:all .3s cubic-bezier(.68,-.55,.27,1.55)}
+.switch.on::after{left:26px}
 
-/* Buttons */
-.btn{background:var(--bg3);border:1px solid var(--brd);color:var(--txt);padding:10px 16px;border-radius:8px;cursor:pointer;font-size:11px;font-weight:600;transition:all .2s;position:relative;overflow:hidden}
-.btn::after{content:'';position:absolute;inset:0;background:linear-gradient(90deg,transparent,rgba(255,255,255,.1),transparent);transform:translateX(-100%);transition:transform .5s}
+.btn{background:var(--bg3);border:1px solid var(--brd);color:var(--txt);padding:10px 16px;border-radius:8px;cursor:pointer;font-size:11px;font-weight:600;transition:all .2s}
 .btn:hover{background:var(--bg4);border-color:var(--b);transform:translateY(-2px)}
-.btn:hover::after{transform:translateX(100%)}
-.btn:active{transform:translateY(0) scale(.98)}
 .btn.primary{background:linear-gradient(135deg,var(--b),var(--p));border:none;color:#fff}
 .btn.danger{background:var(--r);border-color:var(--r);color:#fff}
 .btn.success{background:var(--g);border-color:var(--g);color:#000}
-.btn-icon{width:36px;height:36px;padding:0;display:flex;align-items:center;justify-content:center;font-size:16px}
 
-/* Switch */
-.switch{position:relative;width:50px;height:26px;background:var(--bg4);border-radius:13px;cursor:pointer;transition:all .3s}
-.switch.on{background:linear-gradient(135deg,var(--g),var(--b))}
-.switch::after{content:'';position:absolute;width:22px;height:22px;background:#fff;border-radius:50%;top:2px;left:2px;transition:all .3s cubic-bezier(.68,-.55,.27,1.55);box-shadow:0 2px 8px rgba(0,0,0,.3)}
-.switch.on::after{left:26px}
-
-/* Footer */
 .footer{background:var(--bg2);border-top:1px solid var(--brd);display:flex;align-items:center;padding:0 12px;gap:20px;font-size:10px}
 .footer>span{cursor:pointer;padding:4px 8px;border-radius:4px;transition:all .2s}
-.footer>span:hover{background:var(--bg3);color:var(--txt)}
 .footer .dot{width:8px;height:8px;border-radius:50%;margin-right:4px;display:inline-block}
 .footer .dot.on{background:var(--g);box-shadow:0 0 8px var(--g);animation:blink 2s infinite}
 @keyframes blink{0%,100%{opacity:1}50%{opacity:.5}}
 .footer .dot.off{background:var(--r)}
 
-/* Modal */
 .modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:1000;justify-content:center;align-items:center;backdrop-filter:blur(8px)}
 .modal.on{display:flex;animation:fadeIn .2s}
 @keyframes fadeIn{from{opacity:0}to{opacity:1}}
-.modal-box{background:var(--bg2);border:1px solid var(--brd);border-radius:16px;padding:24px;max-width:450px;width:95%;max-height:85vh;overflow-y:auto;animation:modalIn .3s}
-@keyframes modalIn{from{transform:scale(.9) translateY(20px);opacity:0}to{transform:scale(1) translateY(0);opacity:1}}
+.modal-box{background:var(--bg2);border:1px solid var(--brd);border-radius:16px;padding:24px;max-width:450px;width:95%;max-height:85vh;overflow-y:auto}
 .modal-h{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;padding-bottom:15px;border-bottom:1px solid var(--brd)}
 .modal-t{font-weight:700;font-size:18px}.modal-x{cursor:pointer;font-size:24px;opacity:.5;transition:all .2s;width:36px;height:36px;display:flex;align-items:center;justify-content:center;border-radius:8px}
 .modal-x:hover{opacity:1;background:var(--bg3);transform:rotate(90deg)}
 
-/* Toast */
 .toast-wrap{position:fixed;top:60px;right:20px;z-index:999;display:flex;flex-direction:column;gap:10px;pointer-events:none}
 .toast{background:var(--bg2);border:1px solid var(--brd);padding:14px 18px;border-radius:10px;font-size:12px;display:flex;align-items:center;gap:12px;animation:toastIn .3s;pointer-events:auto;cursor:pointer;box-shadow:0 8px 30px rgba(0,0,0,.4);max-width:300px}
 @keyframes toastIn{from{transform:translateX(100%);opacity:0}to{transform:translateX(0);opacity:1}}
 .toast.out{animation:toastOut .3s forwards}
 @keyframes toastOut{to{transform:translateX(100%);opacity:0}}
 .toast.success{border-color:var(--g)}.toast.error{border-color:var(--r)}.toast.warning{border-color:var(--y)}
-.toast-icon{font-size:18px;flex-shrink:0}
 
-/* Context menu */
-.ctx{position:fixed;background:var(--bg2);border:1px solid var(--brd);border-radius:10px;padding:8px 0;z-index:1001;min-width:160px;display:none;box-shadow:0 8px 30px rgba(0,0,0,.5)}
-.ctx.on{display:block;animation:ctxIn .15s}
-@keyframes ctxIn{from{transform:scale(.9);opacity:0}to{transform:scale(1);opacity:1}}
-.ctx-item{padding:10px 16px;cursor:pointer;font-size:11px;display:flex;align-items:center;gap:10px;transition:all .1s}
-.ctx-item:hover{background:var(--bg3);color:var(--b)}
-.ctx-sep{height:1px;background:var(--brd);margin:6px 0}
-
-/* Command palette */
-.cmd{position:fixed;top:20%;left:50%;transform:translateX(-50%);background:var(--bg2);border:1px solid var(--brd);border-radius:12px;width:500px;max-width:95%;z-index:1002;display:none;box-shadow:0 20px 60px rgba(0,0,0,.6)}
-.cmd.on{display:block;animation:cmdIn .2s}
-@keyframes cmdIn{from{transform:translateX(-50%) translateY(-20px);opacity:0}to{transform:translateX(-50%) translateY(0);opacity:1}}
-.cmd input{width:100%;background:transparent;border:none;color:var(--txt);padding:16px 20px;font-size:14px;border-bottom:1px solid var(--brd)}
-.cmd input:focus{outline:none}
-.cmd-results{max-height:300px;overflow-y:auto}
-.cmd-item{padding:12px 20px;cursor:pointer;display:flex;align-items:center;gap:12px;transition:background .1s}
-.cmd-item:hover,.cmd-item.active{background:var(--bg3)}
-.cmd-item kbd{background:var(--bg4);padding:2px 6px;border-radius:4px;font-size:10px;margin-left:auto}
-
-/* Market timer */
 .timer{position:fixed;top:50px;right:20px;background:var(--bg2);border:1px solid var(--brd);border-radius:8px;padding:8px 14px;font-size:11px;z-index:50;display:flex;align-items:center;gap:8px}
-.timer.closed{border-color:var(--r)}
-.timer.open{border-color:var(--g)}
+.timer.closed{border-color:var(--r)}.timer.open{border-color:var(--g)}
 .timer-dot{width:8px;height:8px;border-radius:50%}
 .timer.closed .timer-dot{background:var(--r)}.timer.open .timer-dot{background:var(--g);animation:blink 1s infinite}
 
-/* Ripple effect */
-.ripple{position:absolute;border-radius:50%;background:rgba(255,255,255,.3);transform:scale(0);animation:ripple .6s linear}
-@keyframes ripple{to{transform:scale(4);opacity:0}}
+/* Mode confirmation modal */
+.mode-confirm{text-align:center;padding:20px}
+.mode-confirm h2{color:var(--r);margin-bottom:20px}
+.mode-confirm .warning-icon{font-size:60px;margin-bottom:20px}
+.mode-confirm p{color:var(--txt2);margin-bottom:20px;line-height:1.6}
+.mode-confirm .limits{background:var(--bg3);padding:15px;border-radius:8px;margin:20px 0;text-align:left}
+.mode-confirm .limits div{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--brd)}
+.mode-confirm .limits div:last-child{border:none}
+.mode-confirm .btns{display:flex;gap:10px;margin-top:20px}
+.mode-confirm .btns button{flex:1;padding:15px;font-size:14px}
 
-/* Sound toggle */
-.sound-btn{position:relative}.sound-btn.muted::after{content:'';position:absolute;width:2px;height:20px;background:var(--r);transform:rotate(45deg);top:8px;left:17px}
-
-/* Loading */
-.loading{position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;z-index:2000}
-.loading.done{animation:fadeOut .5s forwards}
-@keyframes fadeOut{to{opacity:0;visibility:hidden}}
-.loader{width:50px;height:50px;border:3px solid var(--brd);border-top-color:var(--b);border-radius:50%;animation:spin 1s linear infinite}
-@keyframes spin{to{transform:rotate(360deg)}}
-
-/* Responsive */
-@media(max-width:768px){
-.hdr{padding:0 8px}.logo{font-size:12px}
-.card{padding:10px}.val{font-size:20px}
-.qt{width:calc(100% - 20px);right:10px;left:10px}
-}
+@media(max-width:768px){.hdr{padding:0 8px}.logo{font-size:12px}.card{padding:10px}.val{font-size:20px}}
 </style>
 </head>
 <body>
-<div class="loading" id="loading"><div class="loader"></div></div>
+<div class="prod-warning" id="prodWarning">⚠️ PRODUCTION MODE - REAL MONEY ⚠️</div>
 
 <div class="app">
 <div class="hdr">
-<span class="logo" onclick="location.reload()">◉ TERMINAL v9.0</span>
+<span class="logo" onclick="location.reload()">◉ TERMINAL v10.0</span>
+
+<!-- MODE SWITCH -->
+<div class="mode-switch sandbox" id="modeSwitch" onclick="showModeModal()">
+  <span class="mode-dot"></span>
+  <span class="mode-label" id="modeLabel">SANDBOX</span>
+</div>
+
 <div class="hdr-c">
 <span onclick="toggleTheme()" title="Theme">🌓</span>
-<span class="sound-btn" onclick="toggleSound()" title="Sound">🔊</span>
 <span onclick="toggleFullscreen()" title="Fullscreen">⛶</span>
-<span onclick="showCmd()" title="Commands (Ctrl+K)">⌘</span>
 <span id="time">--:--:--</span>
 <span id="regime" class="badge">--</span>
 <span><span class="dot off" id="ws"></span>WS</span>
@@ -547,25 +506,25 @@ body{font:12px ui-monospace,'SF Mono',Monaco,monospace;background:var(--bg);colo
 <div class="main" id="main">
 <div class="panel" id="panel1">
 <div class="grid" id="cards">
-<div class="card" draggable="true" data-id="balance">
-<div class="card-h"><span class="card-t">💰 Balance</span><span class="badge b">LIVE</span></div>
+<div class="card" data-id="balance">
+<div class="card-h"><span class="card-t">💰 Balance</span><span class="badge b" id="modeBadge">SANDBOX</span></div>
 <div class="val b" id="bal">--</div>
 <div class="lbl">P&L <span id="pnl" class="g">--</span></div>
 </div>
-<div class="card" draggable="true" data-id="dd">
+<div class="card" data-id="dd">
 <div class="card-h"><span class="card-t">📉 Drawdown</span><span class="badge" id="rLvl">--</span></div>
 <div class="val" id="dd">0%</div>
 <div class="lbl">Max <span id="mdd">0%</span></div>
 </div>
-<div class="card" draggable="true" data-id="wr">
+<div class="card" data-id="wr">
 <div class="card-h"><span class="card-t">🎯 Win Rate</span></div>
 <div class="val g" id="wr">0%</div>
 <div class="row">
-<div class="mini" onclick="filterTrades('win')"><div class="mini-v g" id="wN">0</div><div class="mini-l">Wins</div></div>
-<div class="mini" onclick="filterTrades('loss')"><div class="mini-v r" id="lN">0</div><div class="mini-l">Loss</div></div>
+<div class="mini"><div class="mini-v g" id="wN">0</div><div class="mini-l">Wins</div></div>
+<div class="mini"><div class="mini-v r" id="lN">0</div><div class="mini-l">Loss</div></div>
 </div>
 </div>
-<div class="card" draggable="true" data-id="perf">
+<div class="card" data-id="perf">
 <div class="card-h"><span class="card-t">📊 Performance</span></div>
 <div class="row">
 <div class="mini"><div class="mini-v" id="sh">0</div><div class="mini-l">Sharpe</div></div>
@@ -575,24 +534,14 @@ body{font:12px ui-monospace,'SF Mono',Monaco,monospace;background:var(--bg);colo
 </div>
 
 <div class="card">
-<div class="card-h">
-<span class="card-t">📈 Equity</span>
-<div class="chart-zoom">
-<button onclick="zoomChart('eq','out')">−</button>
-<button onclick="zoomChart('eq','in')">+</button>
-<button onclick="expandChart('eq')">⛶</button>
-</div>
-</div>
+<div class="card-h"><span class="card-t">📈 Equity</span></div>
 <div class="chart-wrap" id="eqWrap"><canvas id="eqChart"></canvas></div>
 </div>
 
 <div class="card" style="margin-top:10px">
 <div class="card-h">
 <span class="card-t">⚡ Signals</span>
-<div style="display:flex;gap:6px">
 <span class="badge b" id="sc">0</span>
-<button class="btn" style="padding:4px 8px" onclick="executeSelected()">Execute</button>
-</div>
 </div>
 <div id="sigs" style="max-height:250px;overflow-y:auto"></div>
 </div>
@@ -615,7 +564,7 @@ body{font:12px ui-monospace,'SF Mono',Monaco,monospace;background:var(--bg);colo
 
 <div class="card" style="margin-top:10px">
 <div class="card-h"><span class="card-t">📊 Fear & Greed</span></div>
-<div class="gauge" onclick="showFGDetail()">
+<div class="gauge">
 <div class="gauge-bg"></div>
 <div class="gauge-needle" id="fgN"></div>
 <div class="gauge-val" id="fgV">50</div>
@@ -633,66 +582,23 @@ body{font:12px ui-monospace,'SF Mono',Monaco,monospace;background:var(--bg);colo
 
 <div class="footer">
 <span><span class="dot" id="wsDot"></span> <span id="wsStatus">Connecting...</span></span>
-<span onclick="showFGDetail()">F&G: <b id="fFg" class="y">50</b></span>
+<span>Mode: <b id="fMode" class="y">SANDBOX</b></span>
 <span>Signals: <b id="fSig">0</b></span>
 <span>Auto: <b id="fAuto">OFF</b></span>
-<span style="margin-left:auto;opacity:.5">Press <kbd style="background:var(--bg3);padding:2px 6px;border-radius:3px">Ctrl+K</kbd> for commands</span>
 </div>
 </div>
 
-<!-- Quick trade widget -->
-<div class="qt" id="qt">
-<input id="qtTicker" placeholder="Ticker (e.g. SBER)" onkeydown="qtKey(event)" autofocus>
-<input id="qtQty" type="number" value="1" placeholder="Quantity" min="1">
-<div class="qt-btns">
-<button onclick="quickTrade('buy')">BUY</button>
-<button onclick="quickTrade('sell')">SELL</button>
-</div>
-</div>
-
-<!-- Market timer -->
 <div class="timer" id="timer"><span class="timer-dot"></span><span id="timerText">--:--</span></div>
 
-<!-- Modal -->
 <div class="modal" id="modal"><div class="modal-box"><div class="modal-h"><span class="modal-t" id="mT">--</span><span class="modal-x" onclick="closeModal()">×</span></div><div id="mB"></div></div></div>
 
-<!-- Context menu -->
-<div class="ctx" id="ctx">
-<div class="ctx-item" onclick="ctxAction('buy')">🟢 Buy</div>
-<div class="ctx-item" onclick="ctxAction('sell')">🔴 Sell</div>
-<div class="ctx-sep"></div>
-<div class="ctx-item" onclick="ctxAction('info')">📊 Info</div>
-<div class="ctx-item" onclick="ctxAction('chart')">📈 Chart</div>
-<div class="ctx-sep"></div>
-<div class="ctx-item" onclick="ctxAction('copy')">📋 Copy</div>
-<div class="ctx-item" onclick="ctxAction('watch')">⭐ Watch</div>
-</div>
-
-<!-- Command palette -->
-<div class="cmd" id="cmd">
-<input id="cmdInput" placeholder="Type a command..." oninput="filterCmd()" onkeydown="cmdKey(event)">
-<div class="cmd-results" id="cmdResults"></div>
-</div>
-
-<!-- Toasts -->
 <div class="toast-wrap" id="toasts"></div>
 
 <script>
-let ws,D,charts={},selectedSigs=new Set(),ctxTicker='',soundEnabled=true,prevPnl=0;
+let ws,D,charts={},currentMode='sandbox';
 const $=id=>document.getElementById(id);
 const fmt=(v,s)=>v==null||isNaN(v)?'--':(s&&v>0?'+':'')+Math.round(v).toLocaleString('ru')+' ₽';
 
-// Sounds
-const sounds={
-  trade:()=>new Audio('data:audio/wav;base64,UklGRl9vT19XQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YU'+btoa(String.fromCharCode(...new Array(1000).fill(0).map((_,i)=>128+100*Math.sin(i*.1)*Math.exp(-i/500))))).play(),
-  alert:()=>new Audio('data:audio/wav;base64,UklGRl9vT19XQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YU'+btoa(String.fromCharCode(...new Array(2000).fill(0).map((_,i)=>128+80*Math.sin(i*.2)*Math.exp(-i/800))))).play(),
-  win:()=>{confetti({particleCount:100,spread:70,origin:{y:.6}});sounds.trade()},
-  loss:()=>document.body.style.animation='shake .3s',
-};
-function playSound(s){if(soundEnabled&&sounds[s])try{sounds[s]()}catch(e){}}
-function toggleSound(){soundEnabled=!soundEnabled;document.querySelector('.sound-btn').classList.toggle('muted',!soundEnabled);toast(soundEnabled?'Sound ON':'Sound OFF');}
-
-// Theme
 function toggleTheme(){
   const t=document.documentElement.dataset.theme==='light'?'dark':'light';
   document.documentElement.dataset.theme=t;
@@ -701,15 +607,13 @@ function toggleTheme(){
 }
 if(localStorage.getItem('theme')==='light')document.documentElement.dataset.theme='light';
 
-// Fullscreen
 function toggleFullscreen(){
   if(!document.fullscreenElement)document.documentElement.requestFullscreen();
   else document.exitFullscreen();
 }
 
-// Charts
 function initCharts(){
-  const cfg=(id,color)=>new Chart($(id),{type:'line',data:{labels:[],datasets:[{data:[],borderColor:color,backgroundColor:color+'33',fill:true,tension:.4,pointRadius:0,borderWidth:2}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{mode:'index',intersect:false}},scales:{x:{display:false},y:{grid:{color:'#252535'},ticks:{font:{size:9}}}},interaction:{intersect:false,mode:'index'}}});
+  const cfg=(id,color)=>new Chart($(id),{type:'line',data:{labels:[],datasets:[{data:[],borderColor:color,backgroundColor:color+'33',fill:true,tension:.4,pointRadius:0,borderWidth:2}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{display:false},y:{grid:{color:'#252535'},ticks:{font:{size:9}}}}}});
   charts.eq=cfg('eqChart','#40c4ff');
 }
 function updateChart(chart,data){
@@ -717,22 +621,12 @@ function updateChart(chart,data){
   chart.data.datasets[0].data=data;
   chart.update('none');
 }
-function zoomChart(id,dir){
-  const wrap=$(id+'Wrap');
-  const h=parseInt(getComputedStyle(wrap).height);
-  wrap.style.height=(dir==='in'?h+50:Math.max(80,h-50))+'px';
-  charts[id]?.resize();
-}
-function expandChart(id){$(id+'Wrap').classList.toggle('expanded');charts[id]?.resize();}
 
-// WebSocket
 function connect(){
   ws=new WebSocket((location.protocol==='https:'?'wss:':'ws:')+'//'+location.host+'/ws');
   ws.onopen=()=>{
     $('ws').className='dot on';$('wsDot').className='dot on';$('wsStatus').textContent='Connected';
     toast('Connected','success');
-    setTimeout(()=>$('loading').classList.add('done'),500);
-    setInterval(()=>ws?.readyState===1&&ws.send('ping'),20000);
   };
   ws.onclose=()=>{
     $('ws').className='dot off';$('wsDot').className='dot off';$('wsStatus').textContent='Disconnected';
@@ -746,21 +640,25 @@ function connect(){
 }
 
 function handleEvent(e){
-  if(e.ch==='trades'){
-    toast('Trade: '+e.d?.ticker,'success');
-    playSound('trade');
-  }else if(e.ch==='alerts'){
-    toast(e.d?.title||'Alert',e.d?.severity||'warning');
-    playSound('alert');
-  }
+  if(e.ch==='trades')toast('Trade: '+e.d?.ticker,'success');
+  else if(e.ch==='alerts')toast(e.d?.title||'Alert',e.d?.severity||'warning');
 }
 
-// Render
 function render(d){
   $('time').textContent=new Date().toLocaleTimeString();
-  const p=d.port||{},m=d.m||{},brain=d.brain||{},auto=d.auto||{};
+  const p=d.port||{},m=d.m||{},brain=d.brain||{},auto=d.auto||{},mode=d.mode||{};
 
-  // Balance with animation
+  // MODE DISPLAY
+  currentMode=mode.sandbox?'sandbox':'production';
+  const modeSwitch=$('modeSwitch');
+  modeSwitch.className='mode-switch '+currentMode;
+  $('modeLabel').textContent=currentMode.toUpperCase();
+  $('modeBadge').textContent=currentMode.toUpperCase();
+  $('modeBadge').className='badge '+(mode.sandbox?'y':'r');
+  $('fMode').textContent=currentMode.toUpperCase();
+  $('fMode').className=mode.sandbox?'y':'r';
+  $('prodWarning').classList.toggle('on',!mode.sandbox);
+
   const bal=p.total_value||0;
   $('bal').textContent=fmt(bal);
   
@@ -768,18 +666,6 @@ function render(d){
   $('pnl').textContent=fmt(pnl,true);
   $('pnl').className=pnl>=0?'g':'r';
   
-  // Animate PnL changes
-  if(pnl!==prevPnl){
-    if(pnl>prevPnl&&pnl>0)$('bal').classList.add('pulse');
-    else if(pnl<prevPnl&&pnl<0)$('bal').classList.add('shake');
-    setTimeout(()=>$('bal').classList.remove('pulse','shake'),500);
-    
-    // Win/loss effects
-    if(pnl>prevPnl+1000)playSound('win');
-    else if(pnl<prevPnl-1000)playSound('loss');
-    prevPnl=pnl;
-  }
-
   const dd=m.dd||0;
   $('dd').textContent=dd.toFixed(1)+'%';
   $('dd').className='val '+(dd>5?'r':dd>2?'y':'g');
@@ -794,22 +680,15 @@ function render(d){
   $('fSig').textContent=m.sigN||0;
   $('posN').textContent=m.posN||0;
 
-  // Fear & Greed
   const fg=brain.fg||50;
   $('fgV').textContent=Math.round(fg);
-  $('fFg').textContent=Math.round(fg);
   $('fgEmo').textContent=brain.fgEmo||'neutral';
   $('fgN').style.transform=`rotate(${(fg/100)*180-90}deg)`;
-  const fgC=fg<30?'r':fg<45?'o':fg<55?'y':fg<70?'b':'g';
-  $('fgV').className='gauge-val '+fgC;
-  $('fFg').className=fgC;
 
-  // Regime
   $('regime').textContent=brain.regime||'--';
   const regC={'crisis':'r','trending_down':'o','sideways':'y','trending_up':'g'};
   $('regime').className='badge '+(regC[brain.regime]||'');
 
-  // Automation
   $('autoSwitch').className='switch'+(auto.enabled?' on':'');
   $('autoRegime').textContent=auto.regime||'--';
   $('autoPos').textContent=auto.positions||0;
@@ -817,13 +696,10 @@ function render(d){
   $('fAuto').textContent=auto.enabled?'ON':'OFF';
   $('fAuto').className=auto.enabled?'g':'r';
 
-  // Charts
   const h=m.hist||{};
   if(h.eq?.length)updateChart(charts.eq,h.eq);
 
-  // Ticker tape
   renderTape(d.prices||{});
-  
   renderSigs(d.signals||[]);
   renderPos(d.pos||[]);
   updateTimer();
@@ -833,89 +709,101 @@ function renderTape(prices){
   const items=Object.entries(prices).slice(0,20).map(([tk,p])=>{
     if(typeof p!=='object')return'';
     const ch=p.change||p.change_pct||0;
-    return`<div class="tape-item" onclick="showTicker('${tk}')" oncontextmenu="showCtx(event,'${tk}')">
-      <span class="tape-tk">${tk}</span>
-      <span class="tape-ch ${ch>=0?'g':'r'}">${ch>=0?'+':''}${ch.toFixed(2)}%</span>
-    </div>`;
+    return`<div class="tape-item" onclick="showTicker('${tk}')"><span class="tape-tk">${tk}</span><span class="tape-ch ${ch>=0?'g':'r'}">${ch>=0?'+':''}${ch.toFixed(2)}%</span></div>`;
   }).join('');
-  $('tapeInner').innerHTML=items+items; // duplicate for seamless scroll
+  $('tapeInner').innerHTML=items+items;
 }
 
 function renderSigs(sigs){
   let f=sigs.filter(s=>s.signal!=0).sort((a,b)=>Math.abs(b.confidence||0)-Math.abs(a.confidence||0));
   $('sc').textContent=f.length;
-  $('sigs').innerHTML=f.slice(0,15).map(s=>{
-    const sel=selectedSigs.has(s.ticker)?'selected':'';
-    return`<div class="sig ${sel}" draggable="true" onclick="toggleSig('${s.ticker}')" oncontextmenu="showCtx(event,'${s.ticker}')" ondragstart="dragSig(event,'${s.ticker}')">
-      <span><input type="checkbox" ${sel?'checked':''} onclick="event.stopPropagation();toggleSig('${s.ticker}')"> <b>${s.ticker}</b></span>
-      <span class="tag ${s.signal>0?'buy':'sell'}">${s.signal>0?'BUY':'SELL'} ${((s.confidence||0)*100).toFixed(0)}%</span>
-    </div>`;
-  }).join('');
+  $('sigs').innerHTML=f.slice(0,15).map(s=>`<div class="sig" onclick="quickOrder('${s.ticker}','${s.signal>0?'buy':'sell'}')">
+    <span><b>${s.ticker}</b></span>
+    <span class="tag ${s.signal>0?'buy':'sell'}">${s.signal>0?'BUY':'SELL'} ${((s.confidence||0)*100).toFixed(0)}%</span>
+  </div>`).join('');
 }
 
 function renderPos(p){
-  $('positions').innerHTML=p.length?p.map(x=>`<div class="pos ${x.unrealized_pnl>=0?'profit':'loss'}" onclick="showPosDetail('${x.ticker}')" oncontextmenu="showCtx(event,'${x.ticker}')">
+  $('positions').innerHTML=p.length?p.map(x=>`<div class="pos ${x.unrealized_pnl>=0?'profit':'loss'}">
     <button class="pos-close" onclick="event.stopPropagation();closePos('${x.ticker}')">×</button>
     <div class="pos-h"><span class="pos-tk">${x.ticker}</span><span class="${x.unrealized_pnl>=0?'g':'r'}">${fmt(x.unrealized_pnl,1)}</span></div>
     <div style="font-size:10px;color:var(--txt2);margin-top:4px">${x.quantity} × ${fmt(x.current_price)} <span class="${x.pnl_pct>=0?'g':'r'}">(${x.pnl_pct>=0?'+':''}${x.pnl_pct?.toFixed(1)}%)</span></div>
-  </div>`).join(''):'<div style="color:var(--txt2);padding:12px;text-align:center">No positions<br><small>Drag signals here</small></div>';
-  
-  // Drop zone for signals
-  $('positions').ondragover=e=>{e.preventDefault();e.currentTarget.style.background='var(--bg4)'};
-  $('positions').ondragleave=e=>e.currentTarget.style.background='';
-  $('positions').ondrop=e=>{e.preventDefault();e.currentTarget.style.background='';const tk=e.dataTransfer.getData('ticker');if(tk)quickOrder(tk,'buy')};
+  </div>`).join(''):'<div style="color:var(--txt2);padding:12px;text-align:center">No positions</div>';
 }
 
-// Drag & Drop
-function dragSig(e,tk){e.dataTransfer.setData('ticker',tk)}
-let draggedCard=null;
-document.querySelectorAll('.card[draggable]').forEach(card=>{
-  card.ondragstart=e=>{draggedCard=card;card.classList.add('dragging')};
-  card.ondragend=()=>{draggedCard?.classList.remove('dragging');draggedCard=null};
-  card.ondragover=e=>{e.preventDefault();if(draggedCard&&draggedCard!==card)card.classList.add('drag-over')};
-  card.ondragleave=()=>card.classList.remove('drag-over');
-  card.ondrop=e=>{
-    e.preventDefault();card.classList.remove('drag-over');
-    if(draggedCard&&draggedCard!==card){
-      const parent=card.parentNode;
-      const cards=[...parent.children];
-      const fromIdx=cards.indexOf(draggedCard);
-      const toIdx=cards.indexOf(card);
-      if(fromIdx<toIdx)card.after(draggedCard);else card.before(draggedCard);
-    }
-  };
-});
-
-// Market timer
 function updateTimer(){
   const now=new Date();
   const h=now.getHours(),m=now.getMinutes();
   const isOpen=(now.getDay()>0&&now.getDay()<6)&&(h>=10&&(h<18||(h===18&&m<=45)));
   const timer=$('timer');
   timer.className='timer '+(isOpen?'open':'closed');
+  $('timerText').textContent=isOpen?'Market Open':'Market Closed';
+}
+
+// MODE SWITCHING
+function showModeModal(){
+  const isSandbox=currentMode==='sandbox';
+  const newMode=isSandbox?'PRODUCTION':'SANDBOX';
+  const limits=D?.mode?.limits||{max_position_rub:500,max_daily_trades:10};
   
-  if(isOpen){
-    const closeTime=new Date(now);closeTime.setHours(18,45,0);
-    const diff=closeTime-now;
-    const mins=Math.floor(diff/60000);
-    const hrs=Math.floor(mins/60);
-    $('timerText').textContent=`Closes in ${hrs}h ${mins%60}m`;
+  openModal('Switch Trading Mode',`
+    <div class="mode-confirm">
+      <div class="warning-icon">${isSandbox?'⚠️':'✅'}</div>
+      <h2>Switch to ${newMode}?</h2>
+      <p>${isSandbox?
+        '<b style="color:var(--r)">WARNING: Production mode uses REAL MONEY!</b><br>All trades will be executed on your real Tinkoff account.':
+        'Switching to Sandbox mode. All trades will be simulated with virtual money.'
+      }</p>
+      ${isSandbox?`<div class="limits">
+        <div><span>Max Position</span><span>${limits.max_position_rub||500} ₽</span></div>
+        <div><span>Max Daily Trades</span><span>${limits.max_daily_trades||10}</span></div>
+        <div><span>Min Confidence</span><span>${(limits.min_confidence||0.5)*100}%</span></div>
+      </div>`:''}
+      <div class="btns">
+        <button class="btn" onclick="closeModal()">Cancel</button>
+        <button class="btn ${isSandbox?'danger':'success'}" onclick="confirmModeSwitch(${!isSandbox})">
+          ${isSandbox?'🔴 Enable PRODUCTION':'🟢 Enable SANDBOX'}
+        </button>
+      </div>
+    </div>
+  `);
+}
+
+async function confirmModeSwitch(toSandbox){
+  closeModal();
+  toast('Switching mode...','warning');
+  
+  const res=await fetch('/api/mode/switch?sandbox='+toSandbox,{method:'POST'}).then(r=>r.json());
+  
+  if(res.error){
+    toast('Error: '+res.error,'error');
   }else{
-    $('timerText').textContent='Market Closed';
+    toast(`Switched to ${toSandbox?'SANDBOX':'PRODUCTION'}`,toSandbox?'success':'warning');
+    if(!toSandbox){
+      // Production warning
+      setTimeout(()=>toast('⚠️ REAL MONEY MODE ACTIVE','error'),500);
+    }
   }
 }
 
-// API
 async function toggleAuto(){
   const cur=D?.auto?.enabled||false;
+  
+  // Block automation in production without confirmation
+  if(!cur && currentMode==='production'){
+    if(!confirm('⚠️ Enable automation in PRODUCTION mode?\n\nThis will execute REAL trades!')){
+      return;
+    }
+  }
+  
   const res=await fetch('/api/auto/toggle?enabled='+(!cur),{method:'POST'}).then(r=>r.json());
   if(!res.error)toast(res.enabled?'Automation ON 🚀':'Automation OFF','success');
   else toast(res.error,'error');
 }
 
 async function forceCycle(){
+  if(currentMode==='production' && !confirm('Execute cycle in PRODUCTION mode?'))return;
   toast('Starting cycle...');
-  playSound('trade');
   await fetch('/api/auto/cycle',{method:'POST'});
   toast('Cycle started','success');
 }
@@ -924,24 +812,12 @@ async function emergencyStop(){
   if(!confirm('⚠️ Stop all trading?'))return;
   await fetch('/api/auto/toggle?enabled=false',{method:'POST'});
   toast('Emergency stop!','error');
-  playSound('alert');
-}
-
-async function quickTrade(side){
-  const tk=$('qtTicker').value.trim().toUpperCase();
-  const qty=parseInt($('qtQty').value)||1;
-  if(!tk){toast('Enter ticker','warning');return}
-  
-  addRipple(event.target);
-  const res=await fetch(`/api/order?ticker=${tk}&side=${side}&qty=${qty}`,{method:'POST'}).then(r=>r.json());
-  if(res.error)toast(res.error,'error');
-  else{toast(`${side.toUpperCase()} ${qty} ${tk}`,'success');playSound('trade');$('qtTicker').value=''}
 }
 
 async function quickOrder(tk,side){
+  if(currentMode==='production' && !confirm(`Execute ${side.toUpperCase()} ${tk} in PRODUCTION?`))return;
   const res=await fetch(`/api/order?ticker=${tk}&side=${side}&qty=1`,{method:'POST'}).then(r=>r.json());
   toast(res.error||`${side.toUpperCase()} ${tk}`);
-  playSound('trade');
 }
 
 async function closePos(tk){
@@ -957,7 +833,6 @@ async function showTicker(tk){
       <div class="mini"><div class="mini-v">${fmt(res.price?.price)}</div><div class="mini-l">Price</div></div>
       <div class="mini"><div class="mini-v ${(res.price?.change||0)>=0?'g':'r'}">${((res.price?.change||0)).toFixed(2)}%</div><div class="mini-l">Change</div></div>
     </div>
-    <div style="margin-top:14px">Stats: <b>${res.stats?.n||0}</b> trades, PnL: <b class="${(res.stats?.pnl||0)>=0?'g':'r'}">${fmt(res.stats?.pnl)}</b></div>
     <div style="margin-top:14px;display:flex;gap:10px">
       <button class="btn success" style="flex:1" onclick="quickOrder('${tk}','buy');closeModal()">🟢 BUY</button>
       <button class="btn danger" style="flex:1" onclick="quickOrder('${tk}','sell');closeModal()">🔴 SELL</button>
@@ -965,150 +840,22 @@ async function showTicker(tk){
   `);
 }
 
-function showPosDetail(tk){showTicker(tk)}
-function showFGDetail(){
-  openModal('Fear & Greed Index',`
-    <div class="gauge" style="margin:20px auto">
-      <div class="gauge-bg"></div>
-      <div class="gauge-needle" style="transform:rotate(${(D.brain.fg/100)*180-90}deg)"></div>
-      <div class="gauge-val">${D.brain.fg}</div>
-    </div>
-    <div style="text-align:center;margin-top:40px">
-      <div style="font-size:18px;font-weight:700">${D.brain.fgEmo}</div>
-      <div style="margin-top:10px;color:var(--txt2)">History: ${D.brain.fgHist?.slice(-10).join(' → ')}</div>
-    </div>
-  `);
-}
-
-// Interactions
-function toggleSig(tk){selectedSigs.has(tk)?selectedSigs.delete(tk):selectedSigs.add(tk);render(D)}
-function executeSelected(){
-  if(!selectedSigs.size){toast('Select signals first','warning');return}
-  if(!confirm(`Execute ${selectedSigs.size} orders?`))return;
-  selectedSigs.forEach(async tk=>{
-    const sig=D.signals.find(s=>s.ticker===tk);
-    if(sig)await fetch(`/api/order?ticker=${tk}&side=${sig.signal>0?'buy':'sell'}&qty=1`,{method:'POST'});
-  });
-  toast(`Executing ${selectedSigs.size} orders`,'success');
-  playSound('trade');
-  selectedSigs.clear();
-}
-
-function filterTrades(type){toast('Filter: '+type)}
-
-// Quick trade widget toggle
-function toggleQT(){$('qt').classList.toggle('on')}
-function qtKey(e){if(e.key==='Enter')quickTrade('buy');if(e.key==='Escape')toggleQT()}
-
-// Context menu
-function showCtx(e,tk){
-  e.preventDefault();
-  ctxTicker=tk;
-  const ctx=$('ctx');
-  ctx.style.left=Math.min(e.clientX,window.innerWidth-170)+'px';
-  ctx.style.top=Math.min(e.clientY,window.innerHeight-200)+'px';
-  ctx.classList.add('on');
-}
-function ctxAction(act){
-  $('ctx').classList.remove('on');
-  if(act==='buy')quickOrder(ctxTicker,'buy');
-  else if(act==='sell')quickOrder(ctxTicker,'sell');
-  else if(act==='info')showTicker(ctxTicker);
-  else if(act==='copy'){navigator.clipboard.writeText(ctxTicker);toast('Copied: '+ctxTicker)}
-  else if(act==='watch')toast('Added to watchlist: '+ctxTicker);
-}
-
-// Command palette
-const commands=[
-  {name:'Toggle Automation',icon:'🤖',key:'A',action:toggleAuto},
-  {name:'Force Cycle',icon:'▶',key:'C',action:forceCycle},
-  {name:'Quick Trade',icon:'💱',key:'T',action:toggleQT},
-  {name:'Emergency Stop',icon:'🛑',key:'S',action:emergencyStop},
-  {name:'Toggle Theme',icon:'🌓',key:'D',action:toggleTheme},
-  {name:'Toggle Sound',icon:'🔊',key:'M',action:toggleSound},
-  {name:'Fullscreen',icon:'⛶',key:'F',action:toggleFullscreen},
-  {name:'Refresh',icon:'🔄',key:'R',action:()=>ws?.send(JSON.stringify({a:'r'}))},
-];
-let cmdIdx=0;
-function showCmd(){
-  $('cmd').classList.add('on');
-  $('cmdInput').value='';
-  $('cmdInput').focus();
-  renderCmd(commands);
-}
-function hideCmd(){$('cmd').classList.remove('on')}
-function renderCmd(cmds){
-  cmdIdx=0;
-  $('cmdResults').innerHTML=cmds.map((c,i)=>`<div class="cmd-item${i===0?' active':''}" onclick="runCmd(${i})" onmouseover="cmdIdx=${i};renderCmd(window.filteredCmds||commands)">
-    <span>${c.icon}</span><span>${c.name}</span><kbd>${c.key}</kbd>
-  </div>`).join('');
-  window.filteredCmds=cmds;
-}
-function filterCmd(){
-  const q=$('cmdInput').value.toLowerCase();
-  const filtered=commands.filter(c=>c.name.toLowerCase().includes(q));
-  renderCmd(filtered);
-}
-function cmdKey(e){
-  const cmds=window.filteredCmds||commands;
-  if(e.key==='ArrowDown'){cmdIdx=Math.min(cmdIdx+1,cmds.length-1);renderCmd(cmds)}
-  else if(e.key==='ArrowUp'){cmdIdx=Math.max(cmdIdx-1,0);renderCmd(cmds)}
-  else if(e.key==='Enter'){runCmd(cmdIdx)}
-  else if(e.key==='Escape')hideCmd();
-}
-function runCmd(i){
-  const cmds=window.filteredCmds||commands;
-  cmds[i]?.action();
-  hideCmd();
-}
-
-// Modal
 function openModal(title,content){$('mT').textContent=title;$('mB').innerHTML=content;$('modal').classList.add('on')}
 function closeModal(){$('modal').classList.remove('on')}
 
-// Toast
 function toast(msg,type='info'){
   const t=document.createElement('div');
   t.className='toast '+type;
-  t.innerHTML=`<span class="toast-icon">${type==='success'?'✅':type==='error'?'❌':type==='warning'?'⚠️':'ℹ️'}</span><span>${msg}</span>`;
+  t.innerHTML=`<span>${type==='success'?'✅':type==='error'?'❌':type==='warning'?'⚠️':'ℹ️'}</span><span>${msg}</span>`;
   t.onclick=()=>{t.classList.add('out');setTimeout(()=>t.remove(),300)};
   $('toasts').appendChild(t);
   setTimeout(()=>{t.classList.add('out');setTimeout(()=>t.remove(),300)},4000);
 }
 
-// Ripple effect
-function addRipple(el){
-  const r=document.createElement('span');
-  r.className='ripple';
-  r.style.left=event.offsetX+'px';
-  r.style.top=event.offsetY+'px';
-  el.appendChild(r);
-  setTimeout(()=>r.remove(),600);
-}
-
-// Keyboard shortcuts
 document.addEventListener('keydown',e=>{
-  if(e.target.tagName==='INPUT')return;
-  if(e.ctrlKey&&e.key==='k'){e.preventDefault();showCmd()}
-  else if(e.key==='t'||e.key==='T')toggleQT();
-  else if(e.key==='Escape'){closeModal();hideCmd();$('ctx').classList.remove('on');$('qt').classList.remove('on')}
+  if(e.key==='Escape')closeModal();
 });
 
-// Touch gestures (swipe to refresh)
-let touchStart=0;
-document.addEventListener('touchstart',e=>touchStart=e.touches[0].clientY);
-document.addEventListener('touchend',e=>{
-  const diff=e.changedTouches[0].clientY-touchStart;
-  if(diff>100&&window.scrollY===0){ws?.send(JSON.stringify({a:'r'}));toast('Refreshing...')}
-});
-
-// Close menus on click outside
-document.addEventListener('click',e=>{
-  if(!e.target.closest('.ctx'))$('ctx').classList.remove('on');
-  if(!e.target.closest('.cmd')&&!e.target.closest('[onclick*="showCmd"]'))hideCmd();
-});
-
-// Init
 initCharts();
 connect();
 setInterval(updateTimer,60000);

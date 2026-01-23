@@ -190,24 +190,48 @@ class ExecutorService:
         self.tinkoff = None
         self.running = False
 
-        # --- Загрузка токена безопасно ---
-        token = os.getenv("TINKOFF_TOKEN", "").strip()
-
-        if not token:
-            token_path = os.getenv("TINKOFF_TOKEN_FILE")
-            if token_path and os.path.exists(token_path):
-                try:
-                    with open(token_path, "r") as f:
-                        token = f.read().strip()
-                    logger.info("Tinkoff token loaded from file")
-                except Exception as e:
-                    logger.error(f"Failed to read Tinkoff token file: {e}")
-
-        self.token = token
         self.sandbox = os.getenv("TINKOFF_SANDBOX", "true").lower() == "true"
+        # --- Загрузка токена безопасно ---
+# Load both tokens
+        self.tokens = {"sandbox": None, "production": None}
+        
+        # Sandbox token
+        sandbox_path = os.getenv("TINKOFF_TOKEN_SANDBOX_FILE", "/run/secrets/tinkoff_token_sandbox")
+        if os.path.exists(sandbox_path):
+            with open(sandbox_path) as f:
+                self.tokens["sandbox"] = f.read().strip()
+            logger.info("✅ Sandbox token loaded")
+        
+        # Production token  
+        prod_path = os.getenv("TINKOFF_TOKEN_PROD_FILE", "/run/secrets/tinkoff_token_prod")
+        if os.path.exists(prod_path):
+            with open(prod_path) as f:
+                self.tokens["production"] = f.read().strip()
+            logger.info("✅ Production token loaded")
+        
+        # Fallback to old single token
+        if not self.tokens["sandbox"]:
+            old_path = os.getenv("TINKOFF_TOKEN_FILE", "/run/secrets/tinkoff_token")
+            if os.path.exists(old_path):
+                with open(old_path) as f:
+                    self.tokens["sandbox"] = f.read().strip()
+                    self.tokens["production"] = self.tokens["sandbox"]
+                logger.info("✅ Legacy token loaded")
+        
+        # Select token based on mode
+        self.token = self.tokens["sandbox"] if self.sandbox else self.tokens["production"]
+        if not self.token:
+            logger.warning("⚠️ No token for current mode!")
         self.auto_execute = os.getenv("AUTO_EXECUTE", "false").lower() == "true"
         self.min_confidence = float(os.getenv("MIN_CONFIDENCE", "0.45"))
-        self.max_daily_trades = int(os.getenv("MAX_DAILY_TRADES", "20"))
+        
+        # Sandbox = unlimited, Production = strict limits
+        if self.sandbox:
+            self.max_daily_trades = 999999
+            self.max_position_rub = 999999999
+        else:
+            self.max_daily_trades = int(os.getenv("MAX_DAILY_TRADES", "20"))
+            self.max_position_rub = float(os.getenv("MAX_POSITION_RUB", "500"))
         self.daily_trades = 0
 
         # Simulation fallback
@@ -305,6 +329,12 @@ class ExecutorService:
     
     async def execute_order(self, ticker: str, side: OrderSide, quantity: int, price: float, confidence: float = 0) -> dict:
         result = {"ticker": ticker, "side": side.value, "quantity": quantity, "price": price}
+        
+        # Check position size limit
+        order_value = price * quantity
+        if order_value > self.max_position_rub:
+            logger.warning(f"⛔ Position limit: {order_value:.0f}₽ > {self.max_position_rub:.0f}₽")
+            return {"status": "rejected", "reason": f"Position {order_value:.0f}₽ exceeds limit {self.max_position_rub:.0f}₽", "ticker": ticker}
         
         # Risk check first
         try:
@@ -562,7 +592,56 @@ async def positions():
     except:
         return {"positions": []}
 
+
+# === MODE ENDPOINTS ===
+@app.get("/mode")
+async def get_mode():
+    """Get current trading mode"""
+    return {
+        "sandbox": svc.sandbox,
+        "mode": "sandbox" if svc.sandbox else "production",
+        "limits": {
+            "max_position_rub": svc.max_position_rub,
+            "max_daily_trades": svc.max_daily_trades,
+            "min_confidence": svc.min_confidence
+        }
+    }
+
+
+@app.post("/mode/switch")
+async def switch_mode(sandbox: bool = True):
+    """Switch between sandbox and production"""
+    old_mode = svc.sandbox
+    
+    # Get token for new mode
+    new_token = svc.tokens.get("sandbox" if sandbox else "production")
+    if not new_token:
+        return {"error": f"No {'sandbox' if sandbox else 'production'} token configured", "success": False}
+    
+    # Switch mode and token
+    svc.sandbox = sandbox
+    svc.token = new_token
+    
+    # Recreate Tinkoff client
+    svc.tinkoff = TinkoffAPI(new_token, sandbox)
+    await svc.tinkoff.start()
+    
+    # Update limits based on mode
+    if sandbox:
+        svc.max_daily_trades = 999999
+        svc.max_position_rub = 999999999
+    else:
+        svc.max_daily_trades = int(os.getenv("MAX_DAILY_TRADES", "20"))
+        svc.max_position_rub = float(os.getenv("MAX_POSITION_RUB", "500"))
+    
+    logger.info(f"🔄 Switched to {'SANDBOX' if sandbox else 'PRODUCTION'} mode")
+    
+    return {
+        "success": True,
+        "old_mode": "sandbox" if old_mode else "production",
+        "new_mode": "sandbox" if sandbox else "production"
+    }
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8007)
-

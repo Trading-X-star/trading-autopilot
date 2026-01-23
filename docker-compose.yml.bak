@@ -99,11 +99,19 @@ services:
     container_name: executor
     environment:
       <<: *env
-      TINKOFF_TOKEN_FILE: /run/secrets/tinkoff_token
-      TINKOFF_SANDBOX: "true"
-      AUTO_EXECUTE: "false"
+      TINKOFF_TOKEN_SANDBOX_FILE: /run/secrets/tinkoff_token_sandbox
+      TINKOFF_TOKEN_PROD_FILE: /run/secrets/tinkoff_token_prod
+      TINKOFF_TOKEN_PROD_FILE: /run/secrets/tinkoff_token_prod
+      TINKOFF_SANDBOX: "false"
+      AUTO_EXECUTE: "true"
     secrets:
-      - tinkoff_token
+      - tinkoff_token_sandbox
+      - tinkoff_token_prod
+      - source: tinkoff_token_sandbox
+      - source: tinkoff_token_prod
+        uid: "100"
+        gid: "101"
+        mode: 0400
     ports: ["8007:8007"]
     depends_on:
       redis: {condition: service_healthy}
@@ -190,57 +198,6 @@ services:
     depends_on:
       postgres: {condition: service_healthy}
 
-networks:
-  trading-net:
-    driver: bridge
-
-volumes:
-  postgres_data:
-  redis_data:
-  prometheus_data:
-  grafana_data:
-  models_data:
-
-secrets:
-  tinkoff_token:
-    file: ./secrets/tinkoff_token.txt
-
-  automation:
-    build: ./services/automation
-    container_name: automation
-    restart: unless-stopped
-    ports:
-      - "8025:8025"
-    environment:
-      - AUTO_TRADE_ENABLED=true
-    networks:
-      - trading-net
-    depends_on:
-      orchestrator:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8025/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-    build: ./services/automation-v2
-    container_name: automation-v2
-    restart: unless-stopped
-    ports:
-      - "8030:8030"
-    environment:
-      - AUTO_TRADE=true
-    networks:
-      - trading-net
-    depends_on:
-      orchestrator:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8030/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
 
   automation-v2:
     build: ./services/automation-v2
@@ -257,3 +214,29 @@ secrets:
       interval: 30s
       timeout: 10s
       retries: 3
+
+networks:
+  trading-net:
+    driver: bridge
+
+volumes:
+  models_data:
+  postgres_data:
+  redis_data:
+  qdrant_data:
+  neo4j_data:
+  grafana_data:
+  prometheus_data:
+
+secrets:
+  tinkoff_token_sandbox:
+    file: ./secrets/tinkoff_token_sandbox.txt
+  tinkoff_token_prod:
+    file: ./secrets/tinkoff_token_prod.txt
+  tinkoff_token:
+    file: ./secrets/tinkoff_token.txt
+
+  tinkoff_token_sandbox:
+    file: ./secrets/tinkoff_token_sandbox.txt
+  tinkoff_token_prod:
+    file: ./secrets/tinkoff_token_prod.txt

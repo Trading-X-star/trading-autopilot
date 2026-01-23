@@ -28,3 +28,6 @@ HEALTHCHECK --interval=30s --timeout=10s --retries=3 CMD curl -f http://localhos
 
 CMD ["python", "main.py"]
 
+
+# Data collector script
+COPY data_collector.py /app/data_collector.py
