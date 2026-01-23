@@ -1,19 +1,20 @@
 """
-Ensemble Orchestrator - объединяет 3 специализированные модели
-- TrendModel: определяет направление (BULLISH/NEUTRAL/BEARISH)
-- FlatModel: определяет флет (FLAT/TRENDING)  
-- VolatilityModel: определяет волатильность (LOW/MEDIUM/HIGH)
-
-Финальный сигнал формируется с учётом всех трёх режимов
+Enhanced Ensemble Orchestrator v2
+- Adaptive weights based on regime
+- Signal validation
+- Drift monitoring
+- Meta-model support
 """
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from typing import Dict, Optional, Tuple
-from dataclasses import dataclass
+from typing import Dict, Optional, List
+from dataclasses import dataclass, field
 from enum import Enum
+from datetime import datetime
 import joblib
 import logging
+import json
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("EnsembleOrchestrator")
@@ -27,114 +28,137 @@ class Signal(Enum):
 
 @dataclass
 class MarketRegime:
-    """Текущий режим рынка"""
-    trend: str           # BULLISH, NEUTRAL, BEARISH
+    trend: str
     trend_confidence: float
+    trend_probabilities: Dict[str, float]
     is_flat: bool
     flat_confidence: float
-    volatility: str      # LOW, MEDIUM, HIGH
+    flat_probability: float
+    volatility: str
     volatility_confidence: float
+    volatility_probabilities: Dict[str, float]
     
     @property
     def regime_summary(self) -> str:
         if self.is_flat:
             return f"FLAT/{self.volatility}_VOL"
         return f"{self.trend}/{self.volatility}_VOL"
+    
+    @property
+    def risk_level(self) -> str:
+        if self.volatility == 'HIGH':
+            return 'HIGH'
+        if self.is_flat:
+            return 'LOW'
+        return 'MEDIUM'
 
 @dataclass 
 class EnsembleSignal:
-    """Финальный сигнал от ансамбля"""
     signal: Signal
-    strength: float      # 0-1
-    confidence: float    # 0-1
+    strength: float
+    confidence: float
     regime: MarketRegime
     reasoning: str
-    position_size_multiplier: float  # 0-1.5
+    position_size_multiplier: float
+    validation_passed: bool
+    warnings: List[str] = field(default_factory=list)
+    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
 
 class EnsembleOrchestrator:
-    """
-    Оркестратор ансамбля моделей
-    
-    Логика принятия решений:
-    1. Если FLAT + LOW_VOL → HOLD (ждём пробоя)
-    2. Если FLAT + HIGH_VOL → осторожный сигнал по тренду
-    3. Если TRENDING + согласие моделей → усиленный сигнал
-    4. Если HIGH_VOL → уменьшаем размер позиции
-    """
+    """Enhanced Ensemble Orchestrator with validation and monitoring"""
     
     def __init__(self, models_dir: str = None):
         self.models_dir = Path(models_dir) if models_dir else Path(__file__).parent / "models"
         self.trend_model = None
         self.flat_model = None
         self.volatility_model = None
+        self.signal_model = None
         self.is_loaded = False
         
-        # Веса моделей для финального решения
-        self.weights = {
-            'trend': 0.5,
-            'flat': 0.3,
-            'volatility': 0.2
-        }
+        # Adaptive weights
+        self.base_weights = {'trend': 0.5, 'flat': 0.3, 'volatility': 0.2}
         
-        # Матрица решений: (trend, is_flat, volatility) -> (signal, size_mult)
+        # Decision matrix
         self.decision_matrix = self._build_decision_matrix()
+        
+        # Validation thresholds
+        self.min_confidence = 0.55
+        self.high_vol_confidence = 0.75
+        
+        # Drift monitoring
+        self.prediction_history = []
+        self.drift_window = 100
     
     def _build_decision_matrix(self) -> Dict:
-        """Матрица решений на основе комбинации режимов"""
         return {
-            # BULLISH scenarios
-            ('BULLISH', False, 'LOW'):    (Signal.BUY, 1.0),      # Тренд вверх, спокойно
-            ('BULLISH', False, 'MEDIUM'): (Signal.BUY, 1.2),      # Идеальные условия
-            ('BULLISH', False, 'HIGH'):   (Signal.BUY, 0.7),      # Тренд, но риск
-            ('BULLISH', True, 'LOW'):     (Signal.HOLD, 0.5),     # Флет, ждём пробоя
-            ('BULLISH', True, 'MEDIUM'):  (Signal.BUY, 0.6),      # Начало движения?
-            ('BULLISH', True, 'HIGH'):    (Signal.BUY, 0.5),      # Пробой с волой
+            # (trend, is_flat, volatility) -> (signal, size_mult)
+            ('BULLISH', False, 'LOW'):    (Signal.BUY, 1.2),
+            ('BULLISH', False, 'MEDIUM'): (Signal.BUY, 1.0),
+            ('BULLISH', False, 'HIGH'):   (Signal.BUY, 0.5),
+            ('BULLISH', True, 'LOW'):     (Signal.HOLD, 0.3),
+            ('BULLISH', True, 'MEDIUM'):  (Signal.BUY, 0.5),
+            ('BULLISH', True, 'HIGH'):    (Signal.BUY, 0.4),
             
-            # NEUTRAL scenarios  
-            ('NEUTRAL', False, 'LOW'):    (Signal.HOLD, 0.3),
-            ('NEUTRAL', False, 'MEDIUM'): (Signal.HOLD, 0.3),
-            ('NEUTRAL', False, 'HIGH'):   (Signal.HOLD, 0.2),     # Опасно
-            ('NEUTRAL', True, 'LOW'):     (Signal.HOLD, 0.0),     # Полный флет
-            ('NEUTRAL', True, 'MEDIUM'):  (Signal.HOLD, 0.2),
-            ('NEUTRAL', True, 'HIGH'):    (Signal.HOLD, 0.1),
+            ('NEUTRAL', False, 'LOW'):    (Signal.HOLD, 0.2),
+            ('NEUTRAL', False, 'MEDIUM'): (Signal.HOLD, 0.2),
+            ('NEUTRAL', False, 'HIGH'):   (Signal.HOLD, 0.0),
+            ('NEUTRAL', True, 'LOW'):     (Signal.HOLD, 0.0),
+            ('NEUTRAL', True, 'MEDIUM'):  (Signal.HOLD, 0.1),
+            ('NEUTRAL', True, 'HIGH'):    (Signal.HOLD, 0.0),
             
-            # BEARISH scenarios
-            ('BEARISH', False, 'LOW'):    (Signal.SELL, 1.0),
-            ('BEARISH', False, 'MEDIUM'): (Signal.SELL, 1.2),
-            ('BEARISH', False, 'HIGH'):   (Signal.SELL, 0.7),
-            ('BEARISH', True, 'LOW'):     (Signal.HOLD, 0.5),
-            ('BEARISH', True, 'MEDIUM'):  (Signal.SELL, 0.6),
-            ('BEARISH', True, 'HIGH'):    (Signal.SELL, 0.5),
+            ('BEARISH', False, 'LOW'):    (Signal.SELL, 1.2),
+            ('BEARISH', False, 'MEDIUM'): (Signal.SELL, 1.0),
+            ('BEARISH', False, 'HIGH'):   (Signal.SELL, 0.5),
+            ('BEARISH', True, 'LOW'):     (Signal.HOLD, 0.3),
+            ('BEARISH', True, 'MEDIUM'):  (Signal.SELL, 0.5),
+            ('BEARISH', True, 'HIGH'):    (Signal.SELL, 0.4),
         }
     
-    def load_models(self):
-        """Загрузка всех моделей"""
+    def _get_adaptive_weights(self, regime: MarketRegime) -> Dict[str, float]:
+        """Adjust weights based on current regime"""
+        weights = self.base_weights.copy()
+        
+        if regime.volatility == 'HIGH':
+            weights['volatility'] = 0.4
+            weights['trend'] = 0.4
+            weights['flat'] = 0.2
+        elif regime.is_flat:
+            weights['flat'] = 0.5
+            weights['trend'] = 0.3
+            weights['volatility'] = 0.2
+        
+        return weights
+    
+    def load_models(self) -> bool:
         try:
             from trainers.trend_model import TrendModel
             from trainers.flat_model import FlatModel
             from trainers.volatility_model import VolatilityModel
             
-            trend_path = self.models_dir / "trend_model.joblib"
-            flat_path = self.models_dir / "flat_model.joblib"
-            vol_path = self.models_dir / "volatility_model.joblib"
+            paths = {
+                'trend': self.models_dir / "trend_model.joblib",
+                'flat': self.models_dir / "flat_model.joblib",
+                'volatility': self.models_dir / "volatility_model.joblib"
+            }
             
-            if trend_path.exists():
-                self.trend_model = TrendModel.load(str(trend_path))
-                logger.info("✅ Trend model loaded")
-            else:
-                logger.warning(f"⚠️ Trend model not found: {trend_path}")
-                
-            if flat_path.exists():
-                self.flat_model = FlatModel.load(str(flat_path))
-                logger.info("✅ Flat model loaded")
-            else:
-                logger.warning(f"⚠️ Flat model not found: {flat_path}")
-                
-            if vol_path.exists():
-                self.volatility_model = VolatilityModel.load(str(vol_path))
-                logger.info("✅ Volatility model loaded")
-            else:
-                logger.warning(f"⚠️ Volatility model not found: {vol_path}")
+            if paths['trend'].exists():
+                self.trend_model = TrendModel.load(str(paths['trend']))
+                logger.info(f"✅ Trend model loaded (v{self.trend_model.version})")
+            
+            if paths['flat'].exists():
+                self.flat_model = FlatModel.load(str(paths['flat']))
+                logger.info(f"✅ Flat model loaded (v{self.flat_model.version})")
+            
+            if paths['volatility'].exists():
+                self.volatility_model = VolatilityModel.load(str(paths['volatility']))
+                logger.info(f"✅ Volatility model loaded (v{self.volatility_model.version})")
+            
+            # Optional signal model
+            signal_path = self.models_dir / "signal_model.joblib"
+            if signal_path.exists():
+                from trainers.signal_model import SignalModel
+                self.signal_model = SignalModel.load(str(signal_path))
+                logger.info("✅ Signal meta-model loaded")
             
             self.is_loaded = all([self.trend_model, self.flat_model, self.volatility_model])
             return self.is_loaded
@@ -144,151 +168,227 @@ class EnsembleOrchestrator:
             return False
     
     def analyze_regime(self, df: pd.DataFrame) -> MarketRegime:
-        """Анализ текущего режима рынка"""
         # Trend
         if self.trend_model:
             trend_pred = self.trend_model.predict(df)
-            trend = trend_pred['trend_label']
-            trend_conf = trend_pred['confidence']
         else:
-            trend, trend_conf = 'NEUTRAL', 0.5
+            trend_pred = {'trend_label': 'NEUTRAL', 'confidence': 0.5, 
+                         'probabilities': {'bearish': 0.33, 'neutral': 0.34, 'bullish': 0.33}}
         
         # Flat
         if self.flat_model:
             flat_pred = self.flat_model.predict(df)
-            is_flat = flat_pred['is_flat']
-            flat_conf = flat_pred['confidence']
         else:
-            is_flat, flat_conf = False, 0.5
+            flat_pred = {'is_flat': False, 'confidence': 0.5, 'flat_probability': 0.3}
         
         # Volatility
         if self.volatility_model:
             vol_pred = self.volatility_model.predict(df)
-            volatility = vol_pred['regime_label']
-            vol_conf = vol_pred['confidence']
         else:
-            volatility, vol_conf = 'MEDIUM', 0.5
+            vol_pred = {'regime_label': 'MEDIUM', 'confidence': 0.5,
+                       'probabilities': {'low': 0.33, 'medium': 0.34, 'high': 0.33}}
         
         return MarketRegime(
-            trend=trend,
-            trend_confidence=trend_conf,
-            is_flat=is_flat,
-            flat_confidence=flat_conf,
-            volatility=volatility,
-            volatility_confidence=vol_conf
+            trend=trend_pred['trend_label'],
+            trend_confidence=trend_pred['confidence'],
+            trend_probabilities=trend_pred['probabilities'],
+            is_flat=flat_pred['is_flat'],
+            flat_confidence=flat_pred['confidence'],
+            flat_probability=flat_pred.get('flat_probability', 0.5),
+            volatility=vol_pred['regime_label'],
+            volatility_confidence=vol_pred['confidence'],
+            volatility_probabilities=vol_pred['probabilities']
         )
     
+    def validate_signal(self, signal: Signal, regime: MarketRegime, confidence: float) -> tuple:
+        """Validate signal with warnings"""
+        warnings = []
+        passed = True
+        
+        # 1. Minimum confidence
+        if confidence < self.min_confidence:
+            warnings.append(f"Low confidence: {confidence:.1%} < {self.min_confidence:.1%}")
+            passed = False
+        
+        # 2. Don't trade in flat with low confidence
+        if regime.is_flat and signal != Signal.HOLD and regime.flat_confidence > 0.7:
+            warnings.append("Trading in high-confidence FLAT market")
+            passed = False
+        
+        # 3. High volatility needs higher confidence
+        if regime.volatility == 'HIGH' and confidence < self.high_vol_confidence:
+            warnings.append(f"High volatility requires confidence > {self.high_vol_confidence:.1%}")
+            passed = False
+        
+        # 4. Conflicting signals
+        if regime.trend == 'BULLISH' and signal in [Signal.SELL, Signal.STRONG_SELL]:
+            warnings.append("Signal conflicts with bullish trend")
+        elif regime.trend == 'BEARISH' and signal in [Signal.BUY, Signal.STRONG_BUY]:
+            warnings.append("Signal conflicts with bearish trend")
+        
+        return passed, warnings
+    
     def get_signal(self, df: pd.DataFrame) -> EnsembleSignal:
-        """Получение финального сигнала"""
         regime = self.analyze_regime(df)
         
-        # Lookup в матрице решений
+        # Lookup decision
         key = (regime.trend, regime.is_flat, regime.volatility)
-        signal, size_mult = self.decision_matrix.get(key, (Signal.HOLD, 0.3))
+        signal, size_mult = self.decision_matrix.get(key, (Signal.HOLD, 0.2))
         
-        # Усиление сигнала при высокой уверенности
-        avg_confidence = (
-            regime.trend_confidence * self.weights['trend'] +
-            regime.flat_confidence * self.weights['flat'] +
-            regime.volatility_confidence * self.weights['volatility']
+        # Adaptive weights
+        weights = self._get_adaptive_weights(regime)
+        
+        # Weighted confidence
+        confidence = (
+            regime.trend_confidence * weights['trend'] +
+            regime.flat_confidence * weights['flat'] +
+            regime.volatility_confidence * weights['volatility']
         )
         
-        # Корректировка размера позиции по волатильности
-        vol_adjustment = {'LOW': 1.2, 'MEDIUM': 1.0, 'HIGH': 0.6}
-        final_size_mult = size_mult * vol_adjustment.get(regime.volatility, 1.0)
+        # Strong signals on high confidence
+        if confidence > 0.8 and signal == Signal.BUY:
+            signal = Signal.STRONG_BUY
+        elif confidence > 0.8 and signal == Signal.SELL:
+            signal = Signal.STRONG_SELL
         
-        # Strong signals при высокой уверенности
-        if avg_confidence > 0.8:
-            if signal == Signal.BUY:
-                signal = Signal.STRONG_BUY
-            elif signal == Signal.SELL:
-                signal = Signal.STRONG_SELL
+        # Volatility adjustment
+        vol_adj = {'LOW': 1.2, 'MEDIUM': 1.0, 'HIGH': 0.5}
+        final_size = min(size_mult * vol_adj[regime.volatility], 1.5)
         
-        # Формируем reasoning
-        reasoning = self._build_reasoning(regime, signal, avg_confidence)
+        # Validate
+        passed, warnings = self.validate_signal(signal, regime, confidence)
+        
+        # If validation fails, reduce to HOLD
+        if not passed and signal != Signal.HOLD:
+            original_signal = signal
+            signal = Signal.HOLD
+            final_size = 0.0
+            warnings.append(f"Signal downgraded from {original_signal.name} to HOLD")
+        
+        # Build reasoning
+        reasoning = self._build_reasoning(regime, signal, confidence, weights)
+        
+        # Track for drift
+        self._track_prediction(regime, signal, confidence)
         
         return EnsembleSignal(
             signal=signal,
-            strength=abs(signal.value) / 2,  # 0-1
-            confidence=avg_confidence,
+            strength=abs(signal.value) / 2,
+            confidence=confidence,
             regime=regime,
             reasoning=reasoning,
-            position_size_multiplier=min(final_size_mult, 1.5)
+            position_size_multiplier=final_size,
+            validation_passed=passed,
+            warnings=warnings
         )
     
-    def _build_reasoning(self, regime: MarketRegime, signal: Signal, confidence: float) -> str:
-        """Формирование объяснения решения"""
-        parts = []
-        
-        # Trend
-        parts.append(f"Trend: {regime.trend} ({regime.trend_confidence:.0%})")
-        
-        # Flat
-        if regime.is_flat:
-            parts.append(f"Market: FLAT ({regime.flat_confidence:.0%})")
-        else:
-            parts.append(f"Market: TRENDING ({regime.flat_confidence:.0%})")
-        
-        # Volatility
-        parts.append(f"Volatility: {regime.volatility} ({regime.volatility_confidence:.0%})")
-        
-        # Decision
-        parts.append(f"→ Signal: {signal.name}")
-        
+    def _build_reasoning(self, regime: MarketRegime, signal: Signal, 
+                        confidence: float, weights: Dict) -> str:
+        parts = [
+            f"Trend: {regime.trend} ({regime.trend_confidence:.0%}, w={weights['trend']:.1f})",
+            f"Market: {'FLAT' if regime.is_flat else 'TRENDING'} ({regime.flat_confidence:.0%}, w={weights['flat']:.1f})",
+            f"Vol: {regime.volatility} ({regime.volatility_confidence:.0%}, w={weights['volatility']:.1f})",
+            f"→ {signal.name} ({confidence:.0%})"
+        ]
         return " | ".join(parts)
     
-    def predict_batch(self, df: pd.DataFrame, window: int = 20) -> pd.DataFrame:
-        """Batch prediction для бэктеста"""
-        results = []
+    def _track_prediction(self, regime: MarketRegime, signal: Signal, confidence: float):
+        """Track predictions for drift monitoring"""
+        self.prediction_history.append({
+            'timestamp': datetime.now().isoformat(),
+            'trend': regime.trend,
+            'is_flat': regime.is_flat,
+            'volatility': regime.volatility,
+            'signal': signal.name,
+            'confidence': confidence
+        })
         
-        for i in range(window, len(df)):
-            window_df = df.iloc[i-window:i+1]
-            signal = self.get_signal(window_df)
-            
-            results.append({
-                'date': df.index[i] if hasattr(df, 'index') else i,
-                'signal': signal.signal.value,
-                'signal_name': signal.signal.name,
-                'confidence': signal.confidence,
-                'regime': signal.regime.regime_summary,
-                'size_mult': signal.position_size_multiplier
-            })
-        
-        return pd.DataFrame(results)
-
-
-# CLI для тестирования
-if __name__ == "__main__":
-    import sys
+        # Keep only recent
+        if len(self.prediction_history) > self.drift_window:
+            self.prediction_history = self.prediction_history[-self.drift_window:]
     
-    orchestrator = EnsembleOrchestrator()
+    def check_drift(self) -> Dict:
+        """Check for distribution drift in predictions"""
+        if len(self.prediction_history) < 20:
+            return {'status': 'insufficient_data', 'n_samples': len(self.prediction_history)}
+        
+        recent = self.prediction_history[-20:]
+        
+        # Count distributions
+        trend_dist = {}
+        signal_dist = {}
+        avg_confidence = []
+        
+        for p in recent:
+            trend_dist[p['trend']] = trend_dist.get(p['trend'], 0) + 1
+            signal_dist[p['signal']] = signal_dist.get(p['signal'], 0) + 1
+            avg_confidence.append(p['confidence'])
+        
+        warnings = []
+        
+        # Check for stuck predictions
+        for trend, count in trend_dist.items():
+            if count / len(recent) > 0.9:
+                warnings.append(f"Trend stuck at {trend}: {count/len(recent):.0%}")
+        
+        for sig, count in signal_dist.items():
+            if count / len(recent) > 0.9:
+                warnings.append(f"Signal stuck at {sig}: {count/len(recent):.0%}")
+        
+        # Low confidence
+        if np.mean(avg_confidence) < 0.5:
+            warnings.append(f"Low average confidence: {np.mean(avg_confidence):.0%}")
+        
+        return {
+            'status': 'drift_detected' if warnings else 'ok',
+            'warnings': warnings,
+            'trend_distribution': {k: v/len(recent) for k, v in trend_dist.items()},
+            'signal_distribution': {k: v/len(recent) for k, v in signal_dist.items()},
+            'avg_confidence': np.mean(avg_confidence)
+        }
     
-    if len(sys.argv) > 1 and sys.argv[1] == "test":
-        # Тест на синтетических данных
-        np.random.seed(42)
-        dates = pd.date_range('2024-01-01', periods=100, freq='D')
-        df = pd.DataFrame({
-            'open': 100 + np.cumsum(np.random.randn(100) * 0.5),
-            'high': 0,
-            'low': 0,
-            'close': 0,
-            'volume': np.random.randint(1000000, 5000000, 100)
-        }, index=dates)
-        df['close'] = df['open'] + np.random.randn(100) * 0.3
-        df['high'] = df[['open', 'close']].max(axis=1) + abs(np.random.randn(100) * 0.2)
-        df['low'] = df[['open', 'close']].min(axis=1) - abs(np.random.randn(100) * 0.2)
+    def get_model_info(self) -> Dict:
+        """Get info about loaded models"""
+        info = {'loaded': self.is_loaded, 'models': {}}
         
-        print("Testing EnsembleOrchestrator...")
-        print(f"Models dir: {orchestrator.models_dir}")
+        if self.trend_model:
+            info['models']['trend'] = {
+                'version': self.trend_model.version,
+                'metrics': getattr(self.trend_model, 'metrics', {})
+            }
+        if self.flat_model:
+            info['models']['flat'] = {
+                'version': self.flat_model.version,
+                'metrics': getattr(self.flat_model, 'metrics', {})
+            }
+        if self.volatility_model:
+            info['models']['volatility'] = {
+                'version': self.volatility_model.version,
+                'metrics': getattr(self.volatility_model, 'metrics', {})
+            }
         
-        if orchestrator.load_models():
-            signal = orchestrator.get_signal(df)
-            print(f"\n📊 Market Regime: {signal.regime.regime_summary}")
-            print(f"📈 Signal: {signal.signal.name}")
-            print(f"💪 Confidence: {signal.confidence:.1%}")
-            print(f"📐 Position Size: {signal.position_size_multiplier:.1%}")
-            print(f"💡 Reasoning: {signal.reasoning}")
-        else:
-            print("⚠️ Models not trained yet. Run training first.")
-    else:
-        print("Usage: python ensemble_orchestrator.py test")
+        return info
+    
+    def to_dict(self, signal: EnsembleSignal) -> Dict:
+        """Convert signal to JSON-serializable dict"""
+        return {
+            'signal': signal.signal.name,
+            'signal_value': signal.signal.value,
+            'strength': signal.strength,
+            'confidence': signal.confidence,
+            'position_size': signal.position_size_multiplier,
+            'validation_passed': signal.validation_passed,
+            'warnings': signal.warnings,
+            'regime': {
+                'summary': signal.regime.regime_summary,
+                'trend': signal.regime.trend,
+                'trend_confidence': signal.regime.trend_confidence,
+                'is_flat': signal.regime.is_flat,
+                'flat_confidence': signal.regime.flat_confidence,
+                'volatility': signal.regime.volatility,
+                'volatility_confidence': signal.regime.volatility_confidence,
+                'risk_level': signal.regime.risk_level
+            },
+            'reasoning': signal.reasoning,
+            'timestamp': signal.timestamp
+        }

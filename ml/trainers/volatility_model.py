@@ -1,8 +1,8 @@
-"""Volatility Regime Detection Model with GPU"""
+"""Enhanced Volatility Regime Model - Fixed inf values"""
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, f1_score
 import xgboost as xgb
 import joblib
 from pathlib import Path
@@ -16,16 +16,21 @@ class VolatilityModel:
     def __init__(self, use_gpu: bool = True):
         self.model = None
         self.feature_cols = None
-        self.version = "volatility_v1_gpu"
+        self.version = "volatility_v2_gpu"
         self.use_gpu = use_gpu
+        self.metrics = {}
     
-    def prepare_target(self, df: pd.DataFrame, window: int = 20) -> pd.Series:
-        returns = df['close'].pct_change()
-        vol = returns.rolling(window).std() * np.sqrt(252)
-        vol_25, vol_75 = vol.quantile(0.25), vol.quantile(0.75)
+    def prepare_target(self, df: pd.DataFrame, window: int = 5) -> pd.Series:
+        close = df['close'].astype(float)
+        returns = close.pct_change()
+        future_vol = returns.rolling(window).std().shift(-window) * np.sqrt(252)
+        
+        vol_33 = future_vol.quantile(0.33)
+        vol_66 = future_vol.quantile(0.66)
+        
         target = pd.Series(1, index=df.index)
-        target[vol < vol_25] = 0
-        target[vol > vol_75] = 2
+        target[future_vol < vol_33] = 0
+        target[future_vol > vol_66] = 2
         return target
     
     def train(self, df: pd.DataFrame, n_splits: int = 5) -> dict:
@@ -34,19 +39,26 @@ class VolatilityModel:
         target = self.prepare_target(df)
         
         valid_idx = features.notna().all(axis=1) & target.notna()
+        valid_idx.iloc[-10:] = False
+        
         X = features[valid_idx].values
         y = target[valid_idx].values
         
-        tscv = TimeSeriesSplit(n_splits=n_splits)
+        # FIX: Replace inf
+        X = np.where(np.isinf(X), np.nan, X)
+        X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+        
+        tscv = TimeSeriesSplit(n_splits=n_splits, gap=5)
         scores = []
         
         params = {
             'objective': 'multi:softmax',
             'num_class': 3,
-            'n_estimators': 150,
-            'max_depth': 5,
-            'learning_rate': 0.05,
+            'n_estimators': 200,
+            'max_depth': 6,
+            'learning_rate': 0.03,
             'subsample': 0.8,
+            'colsample_bytree': 0.8,
             'verbosity': 0,
             'random_state': 42,
             'tree_method': 'hist',
@@ -61,17 +73,25 @@ class VolatilityModel:
         self.model = xgb.XGBClassifier(**params)
         self.model.fit(X, y)
         
-        return {
+        self.metrics = {
             'accuracy': np.mean(scores),
             'accuracy_std': np.std(scores),
-            'regime_distribution': {'low': (y==0).mean(), 'medium': (y==1).mean(), 'high': (y==2).mean()},
+            'regime_distribution': {
+                'low': float((y == 0).mean()),
+                'medium': float((y == 1).mean()),
+                'high': float((y == 2).mean())
+            },
             'n_samples': len(X),
             'gpu_used': self.use_gpu
         }
+        return self.metrics
     
     def predict(self, df: pd.DataFrame) -> dict:
         features = FeatureBuilder.volatility_features(df)
         X = features[self.feature_cols].iloc[-1:].values
+        X = np.where(np.isinf(X), np.nan, X)
+        X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+        
         proba = self.model.predict_proba(X)[0]
         pred = int(self.model.predict(X)[0])
         return {
@@ -82,7 +102,8 @@ class VolatilityModel:
         }
     
     def save(self, path: str):
-        joblib.dump({'model': self.model, 'feature_cols': self.feature_cols, 'version': self.version}, path)
+        joblib.dump({'model': self.model, 'feature_cols': self.feature_cols,
+                    'version': self.version, 'metrics': self.metrics}, path)
     
     @classmethod
     def load(cls, path: str) -> 'VolatilityModel':
@@ -91,4 +112,5 @@ class VolatilityModel:
         instance.model = data['model']
         instance.feature_cols = data['feature_cols']
         instance.version = data['version']
+        instance.metrics = data.get('metrics', {})
         return instance

@@ -1,8 +1,8 @@
-"""Flat/Sideways Market Detection Model with GPU"""
+"""Enhanced Flat/Sideways Detection Model - Fixed inf values"""
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, f1_score
 import xgboost as xgb
 import joblib
 from pathlib import Path
@@ -16,16 +16,22 @@ class FlatModel:
     def __init__(self, use_gpu: bool = True):
         self.model = None
         self.feature_cols = None
-        self.version = "flat_v1_gpu"
+        self.version = "flat_v2_gpu"
         self.use_gpu = use_gpu
+        self.metrics = {}
     
-    def prepare_target(self, df: pd.DataFrame, window: int = 10) -> pd.Series:
-        high_max = df['high'].rolling(window).max()
-        low_min = df['low'].rolling(window).min()
-        range_pct = (high_max - low_min) / df['close']
-        adx = df.get('adx_14', pd.Series(20, index=df.index))
+    def prepare_target(self, df: pd.DataFrame, window: int = 10, future_window: int = 5) -> pd.Series:
+        close = df['close'].astype(float)
+        high = df['high'].astype(float)
+        low = df['low'].astype(float)
+        
+        future_high = high.rolling(future_window).max().shift(-future_window)
+        future_low = low.rolling(future_window).min().shift(-future_window)
+        future_range = (future_high - future_low) / close
+        
+        range_threshold = future_range.quantile(0.3)
         target = pd.Series(0, index=df.index)
-        target[(range_pct < 0.03) | (adx < 25)] = 1
+        target[future_range < range_threshold] = 1
         return target
     
     def train(self, df: pd.DataFrame, n_splits: int = 5) -> dict:
@@ -34,18 +40,29 @@ class FlatModel:
         target = self.prepare_target(df)
         
         valid_idx = features.notna().all(axis=1) & target.notna()
+        valid_idx.iloc[-10:] = False
+        
         X = features[valid_idx].values
         y = target[valid_idx].values
         
-        tscv = TimeSeriesSplit(n_splits=n_splits)
+        # FIX: Replace inf with nan, then fill
+        X = np.where(np.isinf(X), np.nan, X)
+        X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+        
+        tscv = TimeSeriesSplit(n_splits=n_splits, gap=5)
         scores = []
+        
+        # Balance classes
+        pos_weight = (y == 0).sum() / max((y == 1).sum(), 1)
         
         params = {
             'objective': 'binary:logistic',
-            'n_estimators': 150,
-            'max_depth': 5,
-            'learning_rate': 0.05,
+            'n_estimators': 200,
+            'max_depth': 6,
+            'learning_rate': 0.03,
             'subsample': 0.8,
+            'colsample_bytree': 0.8,
+            'scale_pos_weight': pos_weight,
             'verbosity': 0,
             'random_state': 42,
             'tree_method': 'hist',
@@ -60,28 +77,33 @@ class FlatModel:
         self.model = xgb.XGBClassifier(**params)
         self.model.fit(X, y)
         
-        return {
+        self.metrics = {
             'accuracy': np.mean(scores),
             'accuracy_std': np.std(scores),
             'flat_ratio': y.mean(),
             'n_samples': len(X),
             'gpu_used': self.use_gpu
         }
+        return self.metrics
     
     def predict(self, df: pd.DataFrame) -> dict:
         features = FeatureBuilder.flat_features(df)
         X = features[self.feature_cols].iloc[-1:].values
+        X = np.where(np.isinf(X), np.nan, X)
+        X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+        
         proba = self.model.predict_proba(X)[0]
         pred = int(self.model.predict(X)[0])
         return {
             'is_flat': bool(pred),
             'regime': 'FLAT' if pred else 'TRENDING',
-            'flat_probability': float(proba[1]),
+            'flat_probability': float(proba[1]) if len(proba) > 1 else 0.5,
             'confidence': float(max(proba))
         }
     
     def save(self, path: str):
-        joblib.dump({'model': self.model, 'feature_cols': self.feature_cols, 'version': self.version}, path)
+        joblib.dump({'model': self.model, 'feature_cols': self.feature_cols, 
+                    'version': self.version, 'metrics': self.metrics}, path)
     
     @classmethod
     def load(cls, path: str) -> 'FlatModel':
@@ -90,4 +112,5 @@ class FlatModel:
         instance.model = data['model']
         instance.feature_cols = data['feature_cols']
         instance.version = data['version']
+        instance.metrics = data.get('metrics', {})
         return instance
